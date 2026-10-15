@@ -16,22 +16,30 @@ final class RedisPreferenceSync implements AutoCloseable {
     private final String channel;
     private final Consumer<UUID> invalidation;
     private final Consumer<String> logger;
-    private final ExecutorService executor;
     private final ScheduledExecutorService scheduler;
+    private final ExecutorService publishExecutor;
     private volatile boolean closed;
     private volatile JedisPubSub subscription;
     private volatile Jedis subscriberConnection;
     private volatile Thread subscriberThread;
     private boolean outageLogged;
 
-    RedisPreferenceSync(StorageConfig config, ExecutorService executor, ScheduledExecutorService scheduler,
+    RedisPreferenceSync(StorageConfig config, ScheduledExecutorService scheduler,
                         Consumer<UUID> invalidation, Consumer<String> logger) {
         this.config = config;
         this.channel = config.redisNamespace() + ":preferences";
         this.invalidation = invalidation;
         this.logger = logger;
-        this.executor = executor;
         this.scheduler = scheduler;
+        this.publishExecutor = new java.util.concurrent.ThreadPoolExecutor(
+                1, 1, 0L, TimeUnit.MILLISECONDS,
+                new java.util.concurrent.ArrayBlockingQueue<>(128),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "AxTrade-redis-publish");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                new java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy());
         ping();
     }
 
@@ -74,10 +82,11 @@ final class RedisPreferenceSync implements AutoCloseable {
 
     void publish(UUID playerId) {
         try {
-            executor.execute(() -> {
+            publishExecutor.execute(() -> {
                 if (closed) return;
                 try (Jedis jedis = open()) {
                     jedis.publish(channel, config.redisNamespace() + "|" + config.redisServerId() + "|" + playerId);
+                    resetOutage();
                 } catch (RuntimeException ex) {
                     logOutage(ex);
                 }
@@ -92,6 +101,10 @@ final class RedisPreferenceSync implements AutoCloseable {
             outageLogged = true;
             logger.accept("Redis preference synchronization is temporarily unavailable: " + ex.getMessage());
         }
+    }
+
+    private synchronized void resetOutage() {
+        outageLogged = false;
     }
 
     private void subscribeLoop() {
@@ -111,6 +124,7 @@ final class RedisPreferenceSync implements AutoCloseable {
             subscription = listener;
             try (Jedis jedis = open()) {
                 subscriberConnection = jedis;
+                resetOutage();
                 jedis.subscribe(listener, channel);
             } catch (RuntimeException ex) {
                 if (!closed) logOutage(ex);
@@ -142,5 +156,6 @@ final class RedisPreferenceSync implements AutoCloseable {
         }
         Thread thread = subscriberThread;
         if (thread != null) thread.interrupt();
+        publishExecutor.shutdownNow();
     }
 }

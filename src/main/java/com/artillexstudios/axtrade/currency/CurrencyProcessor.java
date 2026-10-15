@@ -3,15 +3,18 @@ package com.artillexstudios.axtrade.currency;
 import com.artillexstudios.axtrade.hooks.currency.CurrencyHook;
 import org.bukkit.entity.Player;
 
-import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CurrencyProcessor {
     private final Player player;
     private final Set<Map.Entry<CurrencyHook, Double>> currencies;
-    private final Map<Map.Entry<CurrencyHook, Double>, Boolean> states = new HashMap<>();
+    private final Map<Map.Entry<CurrencyHook, Double>, Boolean> states = new ConcurrentHashMap<>();
 
     public CurrencyProcessor(Player player, Set<Map.Entry<CurrencyHook, Double>> currencies) {
         this.player = player;
@@ -19,45 +22,59 @@ public class CurrencyProcessor {
     }
 
     public CompletableFuture<Boolean> run() {
-        CompletableFuture<Boolean>[] futures = new CompletableFuture[currencies.size()];
-
-        int i = 0;
-        for (Map.Entry<CurrencyHook, Double> entry : currencies) {
-            futures[i] = entry.getKey().takeBalance(player.getUniqueId(), entry.getValue()); // try taking money, generate futures
-            i++;
+        if (currencies == null || currencies.isEmpty()) {
+            return CompletableFuture.completedFuture(true);
         }
 
-        // wait for all futures
-        CompletableFuture<Boolean> success = CompletableFuture.allOf(futures).thenApply(unused -> {
-            boolean[] actions = new boolean[futures.length];
-            boolean anyErrors = false;
-            for (int j = 0; j < futures.length; j++) {
-                actions[j] = futures[j].join(); // store currency take results
-                if (!actions[j]) anyErrors = true; // if any currency take failed, store
+        List<CompletableFuture<Void>> steps = new ArrayList<>();
+        AtomicBoolean anyErrors = new AtomicBoolean(false);
+
+        for (Map.Entry<CurrencyHook, Double> entry : currencies) {
+            CompletableFuture<Boolean> takeFuture;
+            try {
+                takeFuture = entry.getKey().takeBalance(player.getUniqueId(), entry.getValue());
+                if (takeFuture == null) {
+                    takeFuture = CompletableFuture.completedFuture(false);
+                }
+            } catch (Throwable t) {
+                takeFuture = CompletableFuture.completedFuture(false);
             }
 
-            // used if reversing is needed to give back the currency
-            int j = 0;
-            for (Map.Entry<CurrencyHook, Double> entry : currencies) {
-                states.put(entry, actions[j]); // map of currency, amount and did they succeed?
-                j++;
-            }
+            CompletableFuture<Void> step = takeFuture.handle((success, throwable) -> {
+                boolean ok = throwable == null && Boolean.TRUE.equals(success);
+                states.put(entry, ok);
+                if (!ok) {
+                    anyErrors.set(true);
+                }
+                return null;
+            });
+            steps.add(step);
+        }
 
-            if (anyErrors) { // if there any fails, reverse process and return fail
-                reverse(); // todo: use return value maybe
+        return CompletableFuture.allOf(steps.toArray(CompletableFuture[]::new)).thenApply(unused -> {
+            if (anyErrors.get()) {
+                reverse();
+                return false;
             }
-
-            return !anyErrors; // if failed, return false, otherwise true
+            return true;
         });
-
-        return success;
     }
 
     public CompletableFuture<Boolean> reverse() {
+        List<CompletableFuture<Boolean>> refunds = new ArrayList<>();
         for (Map.Entry<Map.Entry<CurrencyHook, Double>, Boolean> entry : states.entrySet()) {
-            if (!entry.getValue()) continue; // if failed to send, don't give back
-            entry.getKey().getKey().giveBalance(player.getUniqueId(), entry.getKey().getValue());
+            if (!Boolean.TRUE.equals(entry.getValue())) continue;
+            try {
+                CompletableFuture<Boolean> give = entry.getKey().getKey().giveBalance(player.getUniqueId(), entry.getKey().getValue());
+                if (give != null) {
+                    refunds.add(give);
+                }
+            } catch (Throwable ignored) {
+            }
         }
-        return null; // todo: return a future (maybe there is no point tho)
+        if (refunds.isEmpty()) {
+            return CompletableFuture.completedFuture(true);
+        }
+        return CompletableFuture.allOf(refunds.toArray(CompletableFuture[]::new)).handle((v, t) -> t == null);
     }
 }

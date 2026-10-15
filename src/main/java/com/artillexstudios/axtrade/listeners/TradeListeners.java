@@ -1,6 +1,5 @@
 package com.artillexstudios.axtrade.listeners;
 
-import com.artillexstudios.axtrade.request.Request;
 import com.artillexstudios.axtrade.request.Requests;
 import com.artillexstudios.axtrade.trade.Trade;
 import com.artillexstudios.axtrade.trade.Trades;
@@ -18,11 +17,7 @@ import org.bukkit.event.player.PlayerPickupArrowEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.Iterator;
-import java.util.Map;
-
 import static com.artillexstudios.axtrade.AxTrade.CONFIG;
-import static com.artillexstudios.axtrade.AxTrade.MESSAGEUTILS;
 
 public class TradeListeners implements Listener {
 
@@ -40,19 +35,7 @@ public class TradeListeners implements Listener {
     }
 
     public void handleQuitRequest(@NotNull PlayerQuitEvent event) {
-        Iterator<Request> iterator = Requests.getRequests().iterator();
-        while (iterator.hasNext()) {
-            Request request = iterator.next();
-            if (request.getSender().equals(event.getPlayer())) {
-                iterator.remove();
-                continue;
-            }
-            if (request.getReceiver().equals(event.getPlayer())) {
-                iterator.remove();
-                if (!request.isActive()) continue;
-                MESSAGEUTILS.sendLang(request.getSender(), "request.expired", Map.of("%player%", request.getReceiver().getName()));
-            }
-        }
+        Requests.removeFor(event.getPlayer());
     }
 
     @EventHandler

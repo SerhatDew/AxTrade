@@ -25,6 +25,7 @@ public final class StorageManager implements PreferencesService {
     private final ConcurrentHashMap<UUID, Boolean> values = new ConcurrentHashMap<>();
     private final Set<UUID> ready = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<UUID, Long> generations = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, Long> applied = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, Object> locks = new ConcurrentHashMap<>();
     private volatile SqlStore sql;
     private volatile RedisPreferenceSync redis;
@@ -87,7 +88,7 @@ public final class StorageManager implements PreferencesService {
             sql = SqlStore.open(plugin, config);
             sql.migrateYaml(values);
             if (config.redisEnabled()) {
-                redis = new RedisPreferenceSync(config, executor, scheduler, this::refresh,
+                redis = new RedisPreferenceSync(config, scheduler, this::refresh,
                         message -> plugin.getLogger().warning(message));
                 redis.start();
             }
@@ -115,14 +116,20 @@ public final class StorageManager implements PreferencesService {
             }
             return CompletableFuture.completedFuture(true);
         }
-        long generation = generations.getOrDefault(playerId, 0L);
+        synchronized (lock(playerId)) {
+            ready.remove(playerId);
+        }
+        long generation = nextGeneration(playerId);
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         submit(() -> {
             try {
                 Boolean disabled = sql.readPreference(playerId);
                 synchronized (lock(playerId)) {
-                    if (!closed && generations.getOrDefault(playerId, 0L) == generation) {
-                        values.put(playerId, disabled);
+                    if (!closed) {
+                        if (generation >= applied.getOrDefault(playerId, 0L)) {
+                            applied.put(playerId, generation);
+                            values.put(playerId, disabled);
+                        }
                         ready.add(playerId);
                     }
                 }
@@ -144,11 +151,12 @@ public final class StorageManager implements PreferencesService {
                     result.completeExceptionally(new IllegalStateException("AxTrade storage is closed"));
                     return;
                 }
-                generations.merge(playerId, 1L, Long::sum);
+                long generation = nextGeneration(playerId);
                 try {
                     boolean disabled;
                     if (config.backend() == StorageConfig.Backend.SQL) {
                         disabled = sql.togglePreference(playerId);
+                        applied.put(playerId, generation);
                         values.put(playerId, disabled);
                         RedisPreferenceSync sync = redis;
                         if (sync != null) sync.publish(playerId);
@@ -168,6 +176,24 @@ public final class StorageManager implements PreferencesService {
 
     private Object lock(UUID playerId) {
         return locks.computeIfAbsent(playerId, ignored -> new Object());
+    }
+
+    private long nextGeneration(UUID playerId) {
+        return generations.compute(playerId, (ignored, current) -> (current == null ? 0L : current) + 1L);
+    }
+
+    @Override
+    public void unload(UUID playerId) {
+        if (closed) return;
+        synchronized (lock(playerId)) {
+            ready.remove(playerId);
+            generations.remove(playerId);
+            applied.remove(playerId);
+            if (config.backend() == StorageConfig.Backend.SQL) {
+                values.remove(playerId);
+            }
+            locks.remove(playerId);
+        }
     }
 
     private void saveYaml(UUID playerId, boolean disabled) throws java.io.IOException {
@@ -199,6 +225,9 @@ public final class StorageManager implements PreferencesService {
     private void refresh(UUID playerId) {
         if (closed || sql == null) return;
         CompletableFuture<Void> ignored = new CompletableFuture<>();
+        ignored.whenComplete((unused, error) -> {
+            if (error != null) plugin.getLogger().warning("Could not reconcile preference state from SQL: " + error.getMessage());
+        });
         submit(() -> {
             try {
                 if (playerId == null) {
@@ -206,13 +235,13 @@ public final class StorageManager implements PreferencesService {
                     for (int start = 0; start < ids.size(); start += 512) {
                         Set<UUID> loaded = new java.util.HashSet<>(ids.subList(start, Math.min(start + 512, ids.size())));
                         Map<UUID, Long> snapshot = new java.util.HashMap<>();
-                        for (UUID id : loaded) snapshot.put(id, generations.getOrDefault(id, 0L));
+                        for (UUID id : loaded) snapshot.put(id, nextGeneration(id));
                         for (Map.Entry<UUID, Boolean> entry : sql.readPreferences(loaded).entrySet()) {
                             applyRefresh(entry.getKey(), entry.getValue(), snapshot.getOrDefault(entry.getKey(), -1L));
                         }
                     }
                 } else {
-                    long generation = generations.getOrDefault(playerId, 0L);
+                    long generation = nextGeneration(playerId);
                     applyRefresh(playerId, sql.readPreference(playerId), generation);
                 }
             } catch (Exception ex) {
@@ -220,10 +249,11 @@ public final class StorageManager implements PreferencesService {
             }
         }, ignored);
     }
-
     private void applyRefresh(UUID playerId, boolean disabled, long generation) {
         synchronized (lock(playerId)) {
-            if (ready.contains(playerId) && generations.getOrDefault(playerId, 0L) == generation) {
+            if ((ready.contains(playerId) || generations.containsKey(playerId))
+                    && generation >= applied.getOrDefault(playerId, 0L)) {
+                applied.put(playerId, generation);
                 values.put(playerId, disabled);
             }
         }
@@ -263,8 +293,10 @@ public final class StorageManager implements PreferencesService {
         SqlStore store = sql;
         if (store != null) store.close();
         ready.clear();
+        generations.clear();
+        applied.clear();
+        locks.clear();
     }
-
     private static <T> CompletableFuture<T> failed(Throwable throwable) {
         CompletableFuture<T> future = new CompletableFuture<>();
         future.completeExceptionally(throwable);

@@ -3,6 +3,8 @@ package com.artillexstudios.axtrade.commands.subcommands;
 import com.artillexstudios.axtrade.trade.Trades;
 import org.bukkit.entity.Player;
 
+import java.util.Map;
+
 import static com.artillexstudios.axtrade.AxTrade.MESSAGEUTILS;
 
 public enum Force {
@@ -13,6 +15,8 @@ public enum Force {
             MESSAGEUTILS.sendLang(sender, "request.cant-trade-self");
             return;
         }
-        Trades.addTrade(sender, other);
+        if (Trades.addTrade(sender, other) == null) {
+            MESSAGEUTILS.sendLang(sender, "request.already-in-trade", Map.of("%player%", other.getName()));
+        }
     }
 }

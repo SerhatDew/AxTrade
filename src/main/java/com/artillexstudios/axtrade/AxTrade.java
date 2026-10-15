@@ -3,6 +3,7 @@ package com.artillexstudios.axtrade;
 import com.artillexstudios.axapi.AxPlugin;
 import com.artillexstudios.axapi.config.Config;
 import com.artillexstudios.axapi.libs.boostedyaml.dvs.versioning.BasicVersioning;
+import com.artillexstudios.axapi.scheduler.Scheduler;
 import com.artillexstudios.axapi.libs.boostedyaml.settings.dumper.DumperSettings;
 import com.artillexstudios.axapi.libs.boostedyaml.settings.general.GeneralSettings;
 import com.artillexstudios.axapi.libs.boostedyaml.settings.loader.LoaderSettings;
@@ -22,6 +23,10 @@ import com.artillexstudios.axtrade.safety.SafetyManager;
 import com.artillexstudios.axtrade.trade.TradeTicker;
 import com.artillexstudios.axtrade.utils.NumberUtils;
 import com.artillexstudios.axtrade.utils.UpdateNotifier;
+import com.artillexstudios.axtrade.storage.PreferenceListener;
+import com.artillexstudios.axtrade.storage.PreferencesService;
+import com.artillexstudios.axtrade.storage.StorageManager;
+import com.artillexstudios.axtrade.storage.UnavailablePreferences;
 import org.bstats.bukkit.Metrics;
 import org.bukkit.Bukkit;
 
@@ -36,9 +41,19 @@ public final class AxTrade extends AxPlugin {
     public static MessageUtils MESSAGEUTILS;
     private static AxPlugin instance;
     private static AxMetrics metrics;
-
+    private static volatile PreferencesService preferences = UnavailablePreferences.INSTANCE;
+    private static volatile boolean shuttingDown;
+    private static volatile StorageManager storage;
     public static AxPlugin getInstance() {
         return instance;
+    }
+
+    public static PreferencesService getPreferences() {
+        return preferences;
+    }
+
+    public static StorageManager getStorage() {
+        return storage;
     }
 
     @Override
@@ -57,6 +72,7 @@ public final class AxTrade extends AxPlugin {
     @Override
     public void enable() {
         instance = this;
+        shuttingDown = false;
 
         new Metrics(this, 21500);
 
@@ -66,10 +82,41 @@ public final class AxTrade extends AxPlugin {
         HOOKS = new Config(new File(getDataFolder(), "currencies.yml"), getResource("currencies.yml"), GeneralSettings.builder().setUseDefaults(false).build(), LoaderSettings.builder().setAutoUpdate(true).build(), DumperSettings.DEFAULT, UpdaterSettings.builder().setKeepAll(true).setVersioning(new BasicVersioning("version")).build());
         TOGGLED = new Config(new File(getDataFolder(), "toggled.yml"), getResource("toggled.yml"), GeneralSettings.builder().setUseDefaults(false).build(), LoaderSettings.DEFAULT, DumperSettings.DEFAULT, UpdaterSettings.DEFAULT);
 
+        MESSAGEUTILS = new MessageUtils(LANG.getBackingDocument(), "prefix", CONFIG.getBackingDocument());
+        CommandManager.load();
+
+        StorageManager.openAsync(this, CONFIG, TOGGLED).whenComplete((opened, error) -> {
+            try {
+                Scheduler.get().run(() -> {
+                    if (shuttingDown) {
+                        if (opened != null) opened.close();
+                        return;
+                    }
+                    if (error != null) {
+                        Throwable cause = error instanceof java.util.concurrent.CompletionException && error.getCause() != null
+                                ? error.getCause() : error;
+                        getLogger().severe("AxTrade storage could not start: " + cause.getMessage());
+                        Bukkit.getPluginManager().disablePlugin(this);
+                        return;
+                    }
+                    storage = opened;
+                    preferences = opened;
+                    finishEnable();
+                });
+            } catch (Throwable schedulingFailure) {
+                if (opened != null) opened.close();
+                getLogger().severe("AxTrade could not schedule storage startup: " + schedulingFailure.getMessage());
+            }
+        });
+
+    }
+    private void finishEnable() {
         LanguageManager.reload();
 
-        MESSAGEUTILS = new MessageUtils(LANG.getBackingDocument(), "prefix", CONFIG.getBackingDocument());
-
+        getServer().getPluginManager().registerEvents(new PreferenceListener(preferences), this);
+        for (org.bukkit.entity.Player player : Bukkit.getOnlinePlayers()) {
+            preferences.load(player.getUniqueId());
+        }
         getServer().getPluginManager().registerEvents(new EntityInteractListener(), this);
         getServer().getPluginManager().registerEvents(new TradeListeners(), this);
 
@@ -78,8 +125,6 @@ public final class AxTrade extends AxPlugin {
 
         TradeTicker.start();
         SafetyManager.start();
-
-        CommandManager.load();
 
         Bukkit.getConsoleSender().sendMessage(StringUtils.formatToString("&#00FFDD[AxTrade] Loaded plugin!"));
 
@@ -92,8 +137,16 @@ public final class AxTrade extends AxPlugin {
 
     @Override
     public void disable() {
+        shuttingDown = true;
         if (metrics != null) metrics.cancel();
         SafetyManager.stop();
+        com.artillexstudios.axtrade.trade.Trades.abortAll();
+        com.artillexstudios.axtrade.request.Requests.clear();
+        com.artillexstudios.axtrade.utils.HistoryUtils.close();
+        PreferencesService current = preferences;
+        preferences = UnavailablePreferences.INSTANCE;
+        current.close();
+        storage = null;
     }
 
     @Override

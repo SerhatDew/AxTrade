@@ -9,6 +9,7 @@ import com.artillexstudios.axtrade.commands.subcommands.Request;
 import com.artillexstudios.axtrade.commands.subcommands.Toggle;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import revxrsal.commands.annotation.AutoComplete;
 import revxrsal.commands.annotation.DefaultFor;
 import revxrsal.commands.annotation.Optional;
 import revxrsal.commands.annotation.Subcommand;
@@ -18,18 +19,21 @@ import revxrsal.commands.orphan.OrphanCommand;
 @CommandPermission(value = "axtrade.trade")
 public class Commands implements OrphanCommand {
 
+    @AutoComplete("@trade-players")
     @DefaultFor("~")
     public void trade(Player sender, @Optional Player other) {
         Request.INSTANCE.execute(sender, other);
     }
 
+    @AutoComplete("@incoming-trade-players")
     @Subcommand("accept")
-    public void accept(Player sender, Player other) {
+    public void accept(Player sender, @Optional Player other) {
         Accept.INSTANCE.execute(sender, other);
     }
 
+    @AutoComplete("@incoming-trade-players")
     @Subcommand("deny")
-    public void deny(Player sender, Player other) {
+    public void deny(Player sender, @Optional Player other) {
         Deny.INSTANCE.execute(sender, other);
     }
 

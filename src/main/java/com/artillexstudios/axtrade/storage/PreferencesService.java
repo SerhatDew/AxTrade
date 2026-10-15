@@ -16,5 +16,8 @@ public interface PreferencesService {
     /** Persists the new value and completes only after durable storage succeeds. */
     CompletableFuture<Boolean> toggle(UUID playerId);
 
+    /** Evicts offline player preference cache and resets readiness. */
+    default void unload(UUID playerId) {}
+
     void close();
 }

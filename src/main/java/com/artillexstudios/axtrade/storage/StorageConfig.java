@@ -40,7 +40,7 @@ record StorageConfig(
                 dialect,
                 config.getString("storage.sql.url", ""),
                 config.getString("storage.sql.host", "localhost"),
-                config.getInt("storage.sql.port", dialect.equals("postgresql") ? 5432 : 3306),
+                config.getInt("storage.sql.port", (dialect.equals("postgresql") || dialect.equals("postgres")) ? 5432 : 3306),
                 config.getString("storage.sql.database", "axtrade"),
                 config.getString("storage.sql.username", "axtrade"),
                 config.getString("storage.sql.password", ""),

@@ -1,11 +1,10 @@
 package com.artillexstudios.axtrade.hooks.other;
 
 import com.artillexstudios.axapi.placeholders.PlaceholderHandler;
+import com.artillexstudios.axtrade.AxTrade;
 import com.artillexstudios.axtrade.trade.Trade;
 import com.artillexstudios.axtrade.trade.Trades;
 import org.bukkit.entity.Player;
-
-import static com.artillexstudios.axtrade.AxTrade.TOGGLED;
 
 public class Placeholders {
 
@@ -24,7 +23,7 @@ public class Placeholders {
 
         PlaceholderHandler.register("enabled", ctx -> {
             Player player = ctx.resolve(Player.class);
-            return "" + !TOGGLED.getBoolean("toggled." + player.getUniqueId(), false);
+            return "" + !AxTrade.getPreferences().isDisabled(player.getUniqueId());
         }, true);
 
         PlaceholderHandler.register("active_trades", ctx -> {

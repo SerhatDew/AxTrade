@@ -101,9 +101,11 @@ public class Trade {
             MESSAGEUTILS.sendLang(player2.getPlayer(), "trade.aborted", Map.of("%player%", player1.getPlayer().getName()));
             SoundUtils.playSound(player1.getPlayer(), "aborted");
             SoundUtils.playSound(player2.getPlayer(), "aborted");
-            Scheduler.get().runLater(task -> {
+            if (com.artillexstudios.axtrade.AxTrade.getInstance().isEnabled()) {
+                Scheduler.get().runLater(task -> Trades.removeTrade(this), 1);
+            } else {
                 Trades.removeTrade(this);
-            }, 1);
+            }
         }).exceptionally(throwable -> {
             throwable.printStackTrace();
             return null;
@@ -239,14 +241,17 @@ public class Trade {
                     }, 1);
                 }).exceptionally(throwable -> {
                     throwable.printStackTrace();
+                    abort(true);
                     return null;
                 });
             }).exceptionally(throwable -> {
                 throwable.printStackTrace();
+                abort(true);
                 return null;
             });
         }).exceptionally(throwable -> {
             throwable.printStackTrace();
+            abort(true);
             return null;
         });
     }

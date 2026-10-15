@@ -2,14 +2,18 @@ package com.artillexstudios.axtrade.request;
 
 import org.bukkit.entity.Player;
 
-public class Request {
+public final class Request {
     private final long time;
     private final Player sender;
     private final Player receiver;
-    private boolean active = true;
+    private volatile boolean active = true;
 
     public Request(Player sender, Player receiver) {
-        this.time = System.currentTimeMillis();
+        this(sender, receiver, System.currentTimeMillis());
+    }
+
+    public Request(Player sender, Player receiver, long time) {
+        this.time = time;
         this.sender = sender;
         this.receiver = receiver;
     }
@@ -32,5 +36,9 @@ public class Request {
 
     public void deactivate() {
         this.active = false;
+    }
+
+    public boolean isExpired(long now, long expiryMillis) {
+        return expiryMillis >= 0 && now >= time && now - time >= expiryMillis;
     }
 }
