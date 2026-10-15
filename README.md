@@ -1,34 +1,43 @@
 # AxTrade
 
-My fork of [Artillex-Studios/AxTrade](https://github.com/Artillex-Studios/AxTrade). I've added SQL storage, shared player settings through Redis, and experimental cross-server trading.
+AxTrade fork with SQL storage, Redis preference synchronization and cross-server
+trade requests and offers.
 
-## What's changed
+Cross-server settlement is not release-ready. Redis Pub/Sub and in-memory trade
+state cannot recover a prepared trade after a server crash or a lost commit
+message. Keep Redis disabled on production servers until these failure paths are
+resolved. No multiserver release has been published.
 
-- Player settings and trade history can use MySQL, MariaDB, or PostgreSQL instead of local files.
-- Servers can share trade preferences, with Redis notifying them when a setting changes.
-- Cross-server player lookup, trade requests, and item/currency offers are implemented, but settlement still needs work.
-- Fixes for incoming requests, expired requests, reconnects, currency refunds, and trade confirmation.
+**Bug Reports and Feature Requests:** https://github.com/Artillex-Studios/Issues
 
-**Cross-server trading is not ready for production.** Trade state is held in memory, and Redis does not retain missed messages. A crash or a lost settlement message can leave one side of a trade unfinished. Keep Redis disabled on production servers for now; enabling it also enables cross-server trading. No multiserver release has been published. See [release notes](RELEASE_NOTES.md) for the remaining work.
+**Support:** https://dc.artillex-studios.com/
+
+![axtrade-banner](https://github.com/Artillex-Studios/AxTrade/assets/52270269/5383e676-8355-4ee6-a4b6-624b5c59aaa9)
 
 ## Commands
 
-- `/trade <player>` — send a request, or accept one that player has already sent you.
-- `/trade accept [player]` — accept an incoming request.
-- `/trade deny [player]` — deny an incoming request.
-- `/trade toggle` — turn incoming requests on or off.
+- `/trade <player>` sends a request; sending one back accepts an existing incoming request.
+- `/trade accept [player]` and `/trade deny [player]` act only on incoming,
+  unexpired requests. With one incoming request the name is optional; with
+  multiple requests the player must choose a name.
+- `/trade toggle` changes whether the player accepts requests.
 
-You can leave out the player name when there is only one incoming request. If there are several, you need to pick one. Expired requests cannot be accepted.
+Player-name completion excludes the sender and invisible players.
+`accept`/`deny` completion lists only active incoming senders. Configured command
+aliases and existing permissions remain supported.
 
-Tab completion hides yourself and invisible players. For `accept` and `deny`, it only lists players with an active incoming request. Existing permissions and configured aliases still apply.
-
-Accepting a request checks both players' availability, preferences, safety, game mode, world, distance, and whether either is already trading. Starting a trade clears their other pending requests. Denying a request allows a new one immediately; expired requests and requests from disconnected players are removed.
+Acceptance rechecks availability, trading preferences, safety, game mode, world,
+distance and existing trades. Accepted participants' other requests are removed.
+Denial permits a new request immediately; expiry and disconnect remove pending
+requests.
 
 ## Storage
 
-The default is `storage.backend: yaml`. Player preferences stay in `plugins/AxTrade/toggled.yml`, and text trade logs stay in `plugins/AxTrade/logs/`.
+Java 21 is required to build. The default `storage.backend: yaml` keeps player
+preferences in `plugins/AxTrade/toggled.yml`. Trade logs remain in
+`plugins/AxTrade/logs/`.
 
-For SQL storage, add this to `config.yml`:
+For shared preferences and SQL history, configure `config.yml`:
 
 ```yaml
 storage:
@@ -58,60 +67,64 @@ storage:
     socket-timeout-ms: 3000
 ```
 
-Supported dialects are `mysql`, `mariadb`, and `postgresql`. For PostgreSQL, use port `5432`. Create the database first and give the account permission to create tables and read/write records. The plugin creates `axtrade_preferences` and `axtrade_history`; MySQL/MariaDB history uses `utf8mb4`. Database drivers are included.
+Supported SQL dialects: `mysql`, `mariadb`, `postgresql`. Use port `5432` for
+PostgreSQL. Create the database and grant the plugin user permission to create
+tables and read/write records. The plugin creates `axtrade_preferences` and
+`axtrade_history`; MySQL/MariaDB history uses `utf8mb4`. A non-empty `sql.url`
+overrides the host/port/database fields, including driver-specific TLS settings.
+Drivers are bundled; no separate database plugin is needed.
 
-Setting `sql.url` overrides the host, port, and database fields. Use it for a custom JDBC URL, including driver-specific TLS options.
+Existing disabled preferences from `toggled.yml` are imported without overwriting
+existing SQL records. Back up both before changing backend. Switching back to
+YAML does not export SQL preferences.
 
-Back up `toggled.yml` and your database before switching. Existing disabled preferences are imported from YAML without replacing records already in SQL. Switching back to YAML does not copy SQL preferences back to the file.
+Redis requires SQL. Servers sharing preferences must use the same SQL database
+and Redis namespace; give each server a distinct `server-id`. Use separate
+databases and namespaces for unrelated networks. Redis publishes invalidations,
+not authoritative preference values; recipients reload SQL. Loaded preferences
+are reconciled every 30 seconds to repair missed notifications. A Redis outage
+therefore delays synchronization, but does not replace SQL with stale Redis data.
+Restrict Redis to trusted hosts and use ACL credentials/TLS where appropriate.
 
-Restart the server after storage changes. `/trade reload` is not enough.
+Preference writes are acknowledged only after persistence. Until a player's
+preferences load, trading is refused. A configured backend that cannot connect
+prevents plugin startup rather than silently falling back to local storage.
+SQL history failures are logged; local text logs remain available. History is an
+audit log, not an item-delivery recovery system.
 
-### Sharing preferences with Redis
+Storage changes require a full server restart, not `/trade reload`.
 
-Redis requires SQL. Use the same SQL database and Redis namespace on each server, but give every server its own `server-id`. Keep unrelated networks on separate databases and namespaces.
+## Redis multiserver trading
 
-SQL holds the settings; Redis only tells other servers to reload them. Loaded settings are also checked every 30 seconds, so missed notifications can be picked up later. A Redis outage can delay a change reaching other servers, but it does not replace SQL values with cached ones. Restrict Redis access to trusted hosts and use ACL credentials and TLS where needed.
+Enabling `storage.redis.enabled` also starts the cross-server trade manager.
+Use `storage.backend: sql`, the same SQL database and Redis namespace on every
+participating server, and a unique `storage.redis.server-id` for each server.
+All participating servers must run the same plugin and Minecraft versions and
+have matching currency hooks and trade rules.
 
-Players cannot trade until their settings have loaded. A setting change is only acknowledged after it has been saved. If the configured storage cannot connect, the plugin stops startup instead of falling back to local files. SQL history errors are logged, and local text logs remain available.
+The network player registry adds remote players to `/trade <player>` completion.
+Requests can be accepted or denied by name across servers. A bare `accept` or
+`deny` requires a single incoming request across both local and remote players.
+Remote item and currency offers update the local GUI; changing an offer clears
+confirmation. Session messages are checked against the expected player and
+server, and settlement is bound to the prepared offer.
 
-## Cross-server trading
+### Release blockers
 
-This is experimental. Setting `storage.redis.enabled: true` starts both preference synchronization and the cross-server trade manager.
+- Trade state and escrow are not durable. A lost prepare/finalize message or a
+  server crash can leave a trade unresolved or settle only one participant.
+- Currency operations and inventory delivery do not share an atomic transaction.
+  A partial economy failure cannot be recovered automatically.
+- Cross-server crash, disconnect and reconnect scenarios still need end-to-end
+  verification on two servers with the real economy integrations.
 
-All participating servers need:
-
-- `storage.backend: sql`, the same SQL database, and the same Redis namespace.
-- A different `storage.redis.server-id` on each server.
-- Matching plugin and Minecraft versions, currency integrations, and trade rules.
-
-Remote players appear in `/trade <player>` completion. Requests can be accepted or denied by name across servers. Leaving the name out only works when there is one incoming request in total, counting both local and remote players.
-
-Item and currency offers appear in each player's trade GUI. Changing an offer clears confirmation. Session messages are checked against the expected player and server, and settlement uses the prepared offer.
-
-### What's still missing
-
-- Trade state and escrow are not saved durably. A lost prepare/finalize message or a server crash can leave a trade unresolved, or completed for only one player.
-- Currency transfers and inventory delivery are separate operations. A partial economy failure cannot be recovered automatically.
-- Crash, disconnect, and reconnect scenarios still need testing on two servers with the real economy integrations.
-
-Trade history is just an audit log. It is not a delivery queue or a recovery journal, and it does not protect against lost or duplicated items.
+SQL history is an audit trail, not a delivery queue or recovery journal. Do not
+treat it as protection against lost or duplicated items.
 
 ## Building
 
-Use JDK 21 and Maven:
-
-```sh
-mvn package
-```
-
-The build needs the proprietary economy API JARs listed under `systemPath` in `pom.xml`. Put those in `libs/`; they are not included here. You also need access to the UltraEconomy API repository. Without those dependencies, Maven cannot build all of the existing currency integrations.
-
-## Upstream
-
-Original plugin by Artillex Studios:
-
-- [Source](https://github.com/Artillex-Studios/AxTrade)
-- [Bug reports and feature requests](https://github.com/Artillex-Studios/Issues)
-- [Discord](https://dc.artillex-studios.com/)
-
-![AxTrade banner](https://github.com/Artillex-Studios/AxTrade/assets/52270269/5383e676-8355-4ee6-a4b6-624b5c59aaa9)
+Run `mvn package` with JDK 21. The upstream build also requires the proprietary
+economy API JARs named by the `systemPath` entries in `pom.xml`, placed in
+`libs/`, plus access to the UltraEconomy API repository. Those JARs are not
+included in this repository. Without them, a normal Maven build cannot resolve
+all existing currency integrations.
