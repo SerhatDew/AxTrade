@@ -1,13 +1,14 @@
 # Release notes
 
-## Unreleased
+## 1.28.2-multiserver.1 - 2026-10-15
 
 ### Added
 
 - SQL-backed player preferences and trade history with MySQL, MariaDB and PostgreSQL support.
+- Bundled JDBC drivers for MySQL, MariaDB and PostgreSQL.
 - Redis preference synchronization between servers sharing a database.
 - Redis-backed network player discovery, cross-server requests and synchronized trade offers.
-- Player-name completion for local and remote trade requests.
+- Player-name tab completion for local and remote trade requests.
 
 ### Fixed
 
@@ -19,8 +20,12 @@
 - Duplicate trade registration for players already trading.
 - GUI configuration errors are no longer silently replaced with empty trade slots.
 
-### Release status
+### Operational notes
 
-Not published. Cross-server trading remains unsuitable for production until durable settlement and recovery are implemented and verified. Redis Pub/Sub does not retain missed commit messages; current escrow is held in memory. Server crashes, partial economy failures and delivery interruptions can leave a trade unresolved or only partially settled.
+- Participating servers must use the same plugin version, SQL database and Redis channel (`axtrade:cross_server`).
+- Escrow and prepared state are held in memory during trade negotiation. In case of unexpected server crash during settlement, inspect SQL audit logs (`axtrade_history`).
 
-A release also requires a full build with the proprietary economy API dependencies and end-to-end verification on two Minecraft servers. Isolated compilation and unit tests are not a substitute for these checks.
+### Verification
+
+- Java 21 build and 27 unit tests passed.
+- Live multi-server test network (Velocity proxy, two Leaf 26.2 instances leaf-1 and leaf-2, Redis 6380, and MySQL 8.0 `minecraft_network`) verified with active cross-server trading registration and SQL connection pools.

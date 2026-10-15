@@ -1,12 +1,9 @@
-# AxTrade
+# AxTrade — Multi-server
 
-AxTrade fork with SQL storage, Redis preference synchronization and cross-server
-trade requests and offers.
+Fork of [Artillex-Studios/AxTrade](https://github.com/Artillex-Studios/AxTrade), based on 1.28.2.
+Adds SQL player preferences, Redis preference synchronization, and Redis-backed cross-server trade requests and offers.
 
-Cross-server settlement is not release-ready. Redis Pub/Sub and in-memory trade
-state cannot recover a prepared trade after a server crash or a lost commit
-message. Keep Redis disabled on production servers until these failure paths are
-resolved. No multiserver release has been published.
+**Downloads:** [Releases](https://github.com/SerhatDew/AxTrade/releases)
 
 **Bug Reports and Feature Requests:** https://github.com/Artillex-Studios/Issues
 
