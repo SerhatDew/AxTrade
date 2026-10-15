@@ -26,6 +26,7 @@ public final class StorageManager implements PreferencesService {
     private final Set<UUID> ready = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<UUID, Long> generations = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, Long> applied = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, Object> sessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, Object> locks = new ConcurrentHashMap<>();
     private volatile SqlStore sql;
     private volatile RedisPreferenceSync redis;
@@ -88,8 +89,9 @@ public final class StorageManager implements PreferencesService {
             sql = SqlStore.open(plugin, config);
             sql.migrateYaml(values);
             if (config.redisEnabled()) {
-                redis = new RedisPreferenceSync(config, scheduler, this::refresh,
-                        message -> plugin.getLogger().warning(message));
+                redis = new RedisPreferenceSync(config, scheduler, playerId -> {
+                    refresh(playerId);
+                }, message -> plugin.getLogger().warning(message));
                 redis.start();
             }
         }
@@ -116,16 +118,19 @@ public final class StorageManager implements PreferencesService {
             }
             return CompletableFuture.completedFuture(true);
         }
+        long generation;
+        Object session;
         synchronized (lock(playerId)) {
             ready.remove(playerId);
+            session = session(playerId);
+            generation = nextGeneration(playerId);
         }
-        long generation = nextGeneration(playerId);
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         submit(() -> {
             try {
                 Boolean disabled = sql.readPreference(playerId);
                 synchronized (lock(playerId)) {
-                    if (!closed) {
+                    if (!closed && sessions.get(playerId) == session) {
                         if (generation >= applied.getOrDefault(playerId, 0L)) {
                             applied.put(playerId, generation);
                             values.put(playerId, disabled);
@@ -143,12 +148,18 @@ public final class StorageManager implements PreferencesService {
 
     @Override
     public CompletableFuture<Boolean> toggle(UUID playerId) {
-        if (!isReady(playerId)) return failed(new IllegalStateException("Player preference is not ready"));
+        Object session;
+        synchronized (lock(playerId)) {
+            if (closed || !ready.contains(playerId)) {
+                return failed(new IllegalStateException("Player preference is not ready"));
+            }
+            session = session(playerId);
+        }
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         submit(() -> {
             synchronized (lock(playerId)) {
-                if (closed || !isReady(playerId)) {
-                    result.completeExceptionally(new IllegalStateException("AxTrade storage is closed"));
+                if (closed || !ready.contains(playerId) || sessions.get(playerId) != session) {
+                    result.completeExceptionally(new IllegalStateException("Player preference is not ready"));
                     return;
                 }
                 long generation = nextGeneration(playerId);
@@ -178,6 +189,10 @@ public final class StorageManager implements PreferencesService {
         return locks.computeIfAbsent(playerId, ignored -> new Object());
     }
 
+    private Object session(UUID playerId) {
+        return sessions.computeIfAbsent(playerId, ignored -> new Object());
+    }
+
     private long nextGeneration(UUID playerId) {
         return generations.compute(playerId, (ignored, current) -> (current == null ? 0L : current) + 1L);
     }
@@ -185,20 +200,22 @@ public final class StorageManager implements PreferencesService {
     @Override
     public void unload(UUID playerId) {
         if (closed) return;
-        synchronized (lock(playerId)) {
+        Object playerLock = lock(playerId);
+        synchronized (playerLock) {
             ready.remove(playerId);
+            sessions.remove(playerId);
             generations.remove(playerId);
             applied.remove(playerId);
             if (config.backend() == StorageConfig.Backend.SQL) {
                 values.remove(playerId);
             }
-            locks.remove(playerId);
+            locks.remove(playerId, playerLock);
         }
     }
 
     private void saveYaml(UUID playerId, boolean disabled) throws java.io.IOException {
         synchronized (toggled) {
-            String path = "toggled." + playerId;
+            String path = preferencePath(playerId);
             boolean previous = toggled.getBoolean(path, false);
             if (disabled) toggled.set(path, true);
             else toggled.getBackingDocument().remove(path);
@@ -214,6 +231,20 @@ public final class StorageManager implements PreferencesService {
         }
     }
 
+    private String preferencePath(UUID playerId) {
+        var section = toggled.getSection("toggled");
+        if (section != null) {
+            for (String route : section.getRoutesAsStrings(false)) {
+                try {
+                    if (playerId.equals(UUID.fromString(route))) return "toggled." + route;
+                } catch (IllegalArgumentException ignored) {
+                    // Keep unrelated or malformed legacy keys intact.
+                }
+            }
+        }
+        return "toggled." + playerId;
+    }
+
     private void submit(Runnable runnable, CompletableFuture<?> result) {
         try {
             executor.execute(runnable);
@@ -222,11 +253,13 @@ public final class StorageManager implements PreferencesService {
         }
     }
 
-    private void refresh(UUID playerId) {
-        if (closed || sql == null) return;
-        CompletableFuture<Void> ignored = new CompletableFuture<>();
-        ignored.whenComplete((unused, error) -> {
-            if (error != null) plugin.getLogger().warning("Could not reconcile preference state from SQL: " + error.getMessage());
+    private CompletableFuture<Void> refresh(UUID playerId) {
+        if (closed || sql == null) return CompletableFuture.completedFuture(null);
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        result.whenComplete((unused, error) -> {
+            if (error != null) {
+                plugin.getLogger().warning("Could not reconcile preference state from SQL: " + error.getMessage());
+            }
         });
         submit(() -> {
             try {
@@ -235,23 +268,45 @@ public final class StorageManager implements PreferencesService {
                     for (int start = 0; start < ids.size(); start += 512) {
                         Set<UUID> loaded = new java.util.HashSet<>(ids.subList(start, Math.min(start + 512, ids.size())));
                         Map<UUID, Long> snapshot = new java.util.HashMap<>();
-                        for (UUID id : loaded) snapshot.put(id, nextGeneration(id));
-                        for (Map.Entry<UUID, Boolean> entry : sql.readPreferences(loaded).entrySet()) {
-                            applyRefresh(entry.getKey(), entry.getValue(), snapshot.getOrDefault(entry.getKey(), -1L));
+                        Map<UUID, Object> sessionSnapshot = new java.util.HashMap<>();
+                        for (UUID id : loaded) {
+                            synchronized (lock(id)) {
+                                if (ready.contains(id)) {
+                                    sessionSnapshot.put(id, session(id));
+                                    snapshot.put(id, nextGeneration(id));
+                                }
+                            }
+                        }
+                        if (snapshot.isEmpty()) continue;
+                        Map<UUID, Boolean> refreshed = sql.readPreferences(snapshot.keySet());
+                        for (UUID id : snapshot.keySet()) {
+                            applyRefresh(id, Boolean.TRUE.equals(refreshed.get(id)),
+                                    snapshot.get(id), sessionSnapshot.get(id));
                         }
                     }
                 } else {
-                    long generation = nextGeneration(playerId);
-                    applyRefresh(playerId, sql.readPreference(playerId), generation);
+                    Object session;
+                    long generation;
+                    synchronized (lock(playerId)) {
+                        session = sessions.get(playerId);
+                        if (session == null) {
+                            result.complete(null);
+                            return;
+                        }
+                        generation = nextGeneration(playerId);
+                    }
+                    applyRefresh(playerId, sql.readPreference(playerId), generation, session);
                 }
+                result.complete(null);
             } catch (Exception ex) {
-                plugin.getLogger().warning("Could not reconcile preference state from SQL: " + ex.getMessage());
+                result.completeExceptionally(ex);
             }
-        }, ignored);
+        }, result);
+        return result;
     }
-    private void applyRefresh(UUID playerId, boolean disabled, long generation) {
+    private void applyRefresh(UUID playerId, boolean disabled, long generation, Object session) {
         synchronized (lock(playerId)) {
-            if ((ready.contains(playerId) || generations.containsKey(playerId))
+            if (session != null && sessions.get(playerId) == session
                     && generation >= applied.getOrDefault(playerId, 0L)) {
                 applied.put(playerId, generation);
                 values.put(playerId, disabled);
@@ -295,6 +350,7 @@ public final class StorageManager implements PreferencesService {
         ready.clear();
         generations.clear();
         applied.clear();
+        sessions.clear();
         locks.clear();
     }
     private static <T> CompletableFuture<T> failed(Throwable throwable) {

@@ -37,6 +37,10 @@ public final class Trades {
     public static boolean addCrossServerTrade(Trade trade) {
         if (trade == null) return false;
         synchronized (trades) {
+            if (getTradeLocked(trade.getPlayer1().getPlayer()) != null
+                    || getTradeLocked(trade.getPlayer2().getPlayer()) != null) {
+                return false;
+            }
             trades.add(trade);
             return true;
         }

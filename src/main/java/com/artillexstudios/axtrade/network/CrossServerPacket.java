@@ -13,7 +13,6 @@ public class CrossServerPacket {
         REQUEST,
         ACCEPT,
         DENY,
-        CANCEL_REQUEST,
         TRADE_ITEMS,
         TRADE_CURRENCY,
         TRADE_CONFIRM,
@@ -37,6 +36,7 @@ public class CrossServerPacket {
     private double currencyAmount;
     private int confirmSeconds;
     private String reason;
+    private String offerDigest;
     private long timestamp;
 
     public CrossServerPacket() {
@@ -51,6 +51,29 @@ public class CrossServerPacket {
         return GSON.toJson(this);
     }
 
+    public boolean isWellFormed() {
+        if (type == null || senderUuid == null || isBlank(senderServer) || isBlank(targetServer)
+                || timestamp <= 0) {
+            return false;
+        }
+        return switch (type) {
+            case REQUEST -> receiverUuid != null && !isBlank(senderName) && !isBlank(receiverName);
+            case ACCEPT -> !isBlank(tradeId) && receiverUuid != null && !isBlank(receiverName)
+                    && !isBlank(receiverServer);
+            case DENY -> receiverUuid != null && !isBlank(receiverName);
+            case TRADE_ITEMS -> !isBlank(tradeId) && items != null && items.size() <= 128
+                    && items.stream().allMatch(item -> item == null || item.length() <= 1_000_000);
+            case TRADE_CURRENCY -> !isBlank(tradeId) && !isBlank(currencyName)
+                    && Double.isFinite(currencyAmount) && currencyAmount >= 0;
+            case TRADE_CONFIRM -> !isBlank(tradeId) && confirmSeconds > 0;
+            case TRADE_UNCONFIRM, TRADE_ABORT -> !isBlank(tradeId);
+            case COMMIT_PREPARE, COMMIT_FINALIZE -> !isBlank(tradeId) && !isBlank(offerDigest);
+        };
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
     public static CrossServerPacket fromJson(String json) {
         return GSON.fromJson(json, CrossServerPacket.class);
     }
@@ -167,6 +190,14 @@ public class CrossServerPacket {
         this.reason = reason;
     }
 
+    public String getOfferDigest() {
+        return offerDigest;
+    }
+
+    public void setOfferDigest(String offerDigest) {
+        this.offerDigest = offerDigest;
+    }
+
     public long getTimestamp() {
         return timestamp;
     }
@@ -175,3 +206,4 @@ public class CrossServerPacket {
         this.timestamp = timestamp;
     }
 }
+

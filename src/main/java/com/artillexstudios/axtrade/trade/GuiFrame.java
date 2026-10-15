@@ -4,6 +4,7 @@ import com.artillexstudios.axapi.config.Config;
 import com.artillexstudios.axapi.nms.wrapper.ServerPlayerWrapper;
 import com.artillexstudios.axapi.utils.NumberUtils;
 import com.artillexstudios.axapi.utils.PlayerTextures;
+import com.artillexstudios.axtrade.network.CrossServerTradeSession;
 import com.artillexstudios.axtrade.utils.ItemBuilderUtil;
 import dev.triumphteam.gui.components.GuiAction;
 import dev.triumphteam.gui.guis.BaseGui;
@@ -118,10 +119,10 @@ public class GuiFrame {
     }
 
     private PlayerTextures getTextures(Player target) {
-        try {
-            return ServerPlayerWrapper.wrap(target).textures();
-        } catch (Throwable t) {
+        if (trade instanceof CrossServerTradeSession
+                && trade.getPlayer2().getPlayer().getUniqueId().equals(target.getUniqueId())) {
             return new PlayerTextures(null, null);
         }
+        return ServerPlayerWrapper.wrap(target).textures();
     }
 }

@@ -20,7 +20,9 @@ public class RemoteTradeGui extends TradeGui {
         synchronized (items) {
             items.clear();
             if (newItems != null) {
-                items.addAll(newItems);
+                for (ItemStack item : newItems) {
+                    items.add(item == null ? null : item.clone());
+                }
             }
         }
     }

@@ -18,12 +18,10 @@ import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPubSub;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -35,6 +33,21 @@ import static com.artillexstudios.axtrade.AxTrade.LANG;
 import static com.artillexstudios.axtrade.AxTrade.MESSAGEUTILS;
 
 public class CrossServerManager implements AutoCloseable {
+    private static final long PLAYER_STALE_AFTER_MILLIS = 30_000L;
+    private static final long REQUEST_TIMEOUT_TICKS = 1_200L;
+    private static final long REQUEST_TIMEOUT_MILLIS = 60_000L;
+    private static final long PACKET_MAX_AGE_MILLIS = 120_000L;
+    private static final String UNREGISTER_SCRIPT = """
+            local current = redis.call('hget', KEYS[1], ARGV[1])
+            if current and string.sub(current, 1, string.len(ARGV[2])) == ARGV[2] then
+                redis.call('hdel', KEYS[1], ARGV[1])
+                if redis.call('hget', KEYS[2], ARGV[3]) == ARGV[1] then
+                    redis.call('hdel', KEYS[2], ARGV[3])
+                end
+            end
+            return 1
+            """;
+
     private static volatile CrossServerManager instance;
 
     private final AxTrade plugin;
@@ -44,11 +57,12 @@ public class CrossServerManager implements AutoCloseable {
     private final JedisPool pool;
     private final ExecutorService publishExecutor;
     private final ConcurrentHashMap<String, CrossServerTradeSession> activeSessions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<UUID, CrossServerPacket> incomingRequests = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<UUID, CrossServerPacket> outgoingRequests = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CrossServerPacket> incomingRequests = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CrossServerPacket> outgoingRequests = new ConcurrentHashMap<>();
     private volatile boolean closed = false;
     private Thread subscriberThread;
-    private Jedis subscriberJedis;
+    private volatile Jedis subscriberJedis;
+    private volatile JedisPubSub subscriber;
 
     public CrossServerManager(AxTrade plugin, String serverId, String namespace, JedisPool pool) {
         this.plugin = plugin;
@@ -112,6 +126,14 @@ public class CrossServerManager implements AutoCloseable {
     public String getServerId() {
         return serverId;
     }
+    void logSettlementFailure(String tradeId, Throwable cause) {
+        if (cause == null) {
+            plugin.getLogger().warning("Cross-server trade settlement is unresolved: " + tradeId);
+        } else {
+            plugin.getLogger().warning("Cross-server trade settlement is unresolved: " + tradeId
+                    + " (" + cause.getMessage() + ")");
+        }
+    }
 
     public void start() {
         // Register all current online players
@@ -134,29 +156,48 @@ public class CrossServerManager implements AutoCloseable {
     }
 
     public void registerPlayer(Player player) {
-        if (closed) return;
+        if (closed || player == null) return;
+        UUID uuid = player.getUniqueId();
+        String name = player.getName();
+        String nameKey = name.toLowerCase(Locale.ROOT);
         publishExecutor.execute(() -> {
             try (Jedis jedis = pool.getResource()) {
                 String keyPlayers = namespace + ":players";
                 String keyNames = namespace + ":player_names";
-                jedis.hset(keyPlayers, player.getUniqueId().toString(), serverId + ":" + player.getName());
-                jedis.hset(keyNames, player.getName().toLowerCase(Locale.ROOT), player.getUniqueId().toString());
+                String value = serverId + "\t" + name + "\t" + System.currentTimeMillis();
+                jedis.hset(keyPlayers, uuid.toString(), value);
+                jedis.hset(keyNames, nameKey, uuid.toString());
             } catch (Exception ignored) {
             }
         });
     }
 
     public void unregisterPlayer(Player player) {
-        if (closed) return;
-        publishExecutor.execute(() -> {
-            try (Jedis jedis = pool.getResource()) {
-                String keyPlayers = namespace + ":players";
-                String keyNames = namespace + ":player_names";
-                jedis.hdel(keyPlayers, player.getUniqueId().toString());
-                jedis.hdel(keyNames, player.getName().toLowerCase(Locale.ROOT));
-            } catch (Exception ignored) {
-            }
+        if (player == null) return;
+        UUID uuid = player.getUniqueId();
+        incomingRequests.entrySet().removeIf(entry -> {
+            CrossServerPacket packet = entry.getValue();
+            return uuid.equals(packet.getSenderUuid()) || uuid.equals(packet.getReceiverUuid());
         });
+        outgoingRequests.entrySet().removeIf(entry -> uuid.equals(entry.getValue().getSenderUuid())
+                || uuid.equals(entry.getValue().getReceiverUuid()));
+        unregisterPlayer(uuid, player.getName());
+    }
+
+    private void unregisterPlayer(UUID uuid, String name) {
+        if (closed) return;
+        String uuidKey = uuid.toString();
+        String nameKey = name.toLowerCase(Locale.ROOT);
+        publishExecutor.execute(() -> unregisterPlayerNow(uuidKey, nameKey));
+    }
+
+    private void unregisterPlayerNow(String uuid, String nameKey) {
+        try (Jedis jedis = pool.getResource()) {
+            jedis.eval(UNREGISTER_SCRIPT,
+                    List.of(namespace + ":players", namespace + ":player_names"),
+                    List.of(uuid, serverId + "\t", nameKey));
+        } catch (Exception ignored) {
+        }
     }
 
     public NetworkPlayer findPlayer(String name) {
@@ -165,12 +206,7 @@ public class CrossServerManager implements AutoCloseable {
             String uuidStr = jedis.hget(namespace + ":player_names", name.toLowerCase(Locale.ROOT));
             if (uuidStr == null) return null;
             UUID uuid = UUID.fromString(uuidStr);
-            String info = jedis.hget(namespace + ":players", uuidStr);
-            if (info == null) return null;
-            String[] parts = info.split(":", 2);
-            String targetServer = parts[0];
-            String realName = parts.length > 1 ? parts[1] : name;
-            return new NetworkPlayer(uuid, realName, targetServer, System.currentTimeMillis());
+            return readNetworkPlayer(jedis, uuid, name);
         } catch (Exception ex) {
             return null;
         }
@@ -179,17 +215,48 @@ public class CrossServerManager implements AutoCloseable {
     public List<String> getNetworkPlayerNames(Player viewer) {
         if (closed) return List.of();
         try (Jedis jedis = pool.getResource()) {
-            Set<String> names = jedis.hkeys(namespace + ":player_names");
+            Map<String, String> names = jedis.hgetAll(namespace + ":player_names");
             List<String> result = new ArrayList<>();
-            for (String n : names) {
-                if (viewer != null && n.equalsIgnoreCase(viewer.getName())) continue;
-                if (Bukkit.getPlayerExact(n) != null) continue; // local players already handled
-                result.add(n);
+            for (Map.Entry<String, String> entry : names.entrySet()) {
+                String name = entry.getKey();
+                if (viewer != null && name.equalsIgnoreCase(viewer.getName())) continue;
+                if (Bukkit.getPlayerExact(name) != null) continue;
+                try {
+                    NetworkPlayer player = readNetworkPlayer(jedis, UUID.fromString(entry.getValue()), name);
+                    if (player != null) result.add(name);
+                } catch (IllegalArgumentException ignored) {
+                }
             }
             return result;
         } catch (Exception ex) {
             return List.of();
         }
+    }
+
+    private NetworkPlayer readNetworkPlayer(Jedis jedis, UUID uuid, String fallbackName) {
+        String info = jedis.hget(namespace + ":players", uuid.toString());
+        if (info == null) return null;
+
+        String targetServer;
+        String realName;
+        long lastSeen;
+        String[] fields = info.split("\t", 3);
+        if (fields.length == 3) {
+            targetServer = fields[0];
+            realName = fields[1];
+            try {
+                lastSeen = Long.parseLong(fields[2]);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+            if (lastSeen <= 0 || System.currentTimeMillis() - lastSeen > PLAYER_STALE_AFTER_MILLIS) {
+                return null;
+            }
+        } else {
+            return null;
+        }
+        if (targetServer.isBlank() || realName.isBlank()) return null;
+        return new NetworkPlayer(uuid, realName, targetServer, lastSeen);
     }
 
     public void publish(CrossServerPacket packet) {
@@ -203,17 +270,19 @@ public class CrossServerManager implements AutoCloseable {
     }
 
     public boolean sendRequest(Player sender, NetworkPlayer target) {
-        if (closed) return false;
+        if (closed || sender == null || target == null || target.uuid() == null
+                || target.name() == null || target.name().isBlank()
+                || target.serverId() == null || target.serverId().isBlank()
+                || target.serverId().equalsIgnoreCase(serverId)
+                || target.uuid().equals(sender.getUniqueId())) {
+            return false;
+        }
         if (Trades.isTrading(sender)) {
             MESSAGEUTILS.sendLang(sender, "request.already-in-trade", Map.of("%player%", target.name()));
             return false;
         }
         if (AxTrade.getPreferences().isDisabled(sender.getUniqueId())) {
             MESSAGEUTILS.sendLang(sender, "request.disabled-trading", Map.of("%player%", target.name()));
-            return false;
-        }
-        if (outgoingRequests.containsKey(target.uuid())) {
-            MESSAGEUTILS.sendLang(sender, "request.already-sent", Map.of("%player%", target.name()));
             return false;
         }
 
@@ -225,39 +294,45 @@ public class CrossServerManager implements AutoCloseable {
         packet.setReceiverName(target.name());
         packet.setTargetServer(target.serverId());
 
-        outgoingRequests.put(target.uuid(), packet);
+        String key = requestKey(packet);
+        if (outgoingRequests.putIfAbsent(key, packet) != null) {
+            MESSAGEUTILS.sendLang(sender, "request.already-sent", Map.of("%player%", target.name()));
+            return false;
+        }
         publish(packet);
 
         MESSAGEUTILS.sendLang(sender, "request.sent-sender", Map.of("%player%", target.name()));
         SoundUtils.playSound(sender, "requested");
 
-        // Expire after 60s
         Scheduler.get().runLater(task -> {
-            CrossServerPacket req = outgoingRequests.remove(target.uuid());
-            if (req != null && sender.isOnline()) {
+            if (outgoingRequests.remove(key, packet) && sender.isOnline()) {
                 MESSAGEUTILS.sendLang(sender, "request.expired", Map.of("%player%", target.name()));
             }
-        }, 1200);
+        }, REQUEST_TIMEOUT_TICKS);
 
         return true;
     }
 
     public boolean acceptRequest(Player receiver, String senderName) {
         if (closed) return false;
+        List<CrossServerPacket> requests = incomingRequests.values().stream()
+                .filter(request -> request.getReceiverUuid().equals(receiver.getUniqueId()))
+                .filter(this::isRequestActive)
+                .toList();
         CrossServerPacket req = null;
         if (senderName == null) {
-            if (incomingRequests.isEmpty()) {
+            if (requests.isEmpty()) {
                 return false;
             }
-            if (incomingRequests.size() > 1) {
+            if (requests.size() > 1) {
                 MESSAGEUTILS.sendLang(receiver, "request.multiple", Map.of());
                 return true;
             }
-            req = incomingRequests.values().iterator().next();
+            req = requests.get(0);
         } else {
-            for (CrossServerPacket p : incomingRequests.values()) {
-                if (p.getSenderName().equalsIgnoreCase(senderName)) {
-                    req = p;
+            for (CrossServerPacket request : requests) {
+                if (request.getSenderName().equalsIgnoreCase(senderName)) {
+                    req = request;
                     break;
                 }
             }
@@ -272,13 +347,16 @@ public class CrossServerManager implements AutoCloseable {
             return true;
         }
 
-        incomingRequests.remove(req.getSenderUuid());
+        String requestKey = requestKey(req);
+        if (!incomingRequests.remove(requestKey, req)) {
+            return false;
+        }
 
         String tradeId = UUID.randomUUID().toString();
         CrossServerPacket acceptPacket = new CrossServerPacket(CrossServerPacket.Type.ACCEPT);
         acceptPacket.setTradeId(tradeId);
         acceptPacket.setSenderUuid(req.getSenderUuid());
-        acceptPacket.setSenderServer(req.getSenderServer());
+        acceptPacket.setSenderServer(serverId);
         acceptPacket.setReceiverUuid(receiver.getUniqueId());
         acceptPacket.setReceiverName(receiver.getName());
         acceptPacket.setReceiverServer(serverId);
@@ -293,26 +371,32 @@ public class CrossServerManager implements AutoCloseable {
 
     public boolean denyRequest(Player receiver, String senderName) {
         if (closed) return false;
+        List<CrossServerPacket> requests = incomingRequests.values().stream()
+                .filter(request -> request.getReceiverUuid().equals(receiver.getUniqueId()))
+                .filter(this::isRequestActive)
+                .toList();
         CrossServerPacket req = null;
         if (senderName == null) {
-            if (incomingRequests.isEmpty()) {
-                return false;
-            }
-            req = incomingRequests.values().iterator().next();
+            if (requests.isEmpty()) return false;
+            req = requests.get(0);
         } else {
-            for (CrossServerPacket p : incomingRequests.values()) {
-                if (p.getSenderName().equalsIgnoreCase(senderName)) {
-                    req = p;
+            for (CrossServerPacket request : requests) {
+                if (request.getSenderName().equalsIgnoreCase(senderName)) {
+                    req = request;
                     break;
                 }
             }
         }
         if (req == null) return false;
 
-        incomingRequests.remove(req.getSenderUuid());
+        String requestKey = requestKey(req);
+        if (!incomingRequests.remove(requestKey, req)) {
+            return false;
+        }
 
         CrossServerPacket packet = new CrossServerPacket(CrossServerPacket.Type.DENY);
         packet.setSenderUuid(req.getSenderUuid());
+        packet.setSenderServer(serverId);
         packet.setTargetServer(req.getSenderServer());
         packet.setReceiverUuid(receiver.getUniqueId());
         packet.setReceiverName(receiver.getName());
@@ -329,12 +413,17 @@ public class CrossServerManager implements AutoCloseable {
 
     public List<String> getIncomingSenderNames(Player receiver) {
         List<String> list = new ArrayList<>();
-        for (CrossServerPacket p : incomingRequests.values()) {
-            if (p.getReceiverUuid().equals(receiver.getUniqueId())) {
-                list.add(p.getSenderName());
+        for (CrossServerPacket packet : incomingRequests.values()) {
+            if (packet.getReceiverUuid().equals(receiver.getUniqueId()) && isRequestActive(packet)) {
+                list.add(packet.getSenderName());
             }
         }
         return list;
+    }
+
+    private boolean isRequestActive(CrossServerPacket packet) {
+        long age = System.currentTimeMillis() - packet.getTimestamp();
+        return age >= 0 && age <= REQUEST_TIMEOUT_MILLIS;
     }
 
     private void startSession(String tradeId, Player localPlayer, UUID remoteUuid, String remoteName, String remoteServer) {
@@ -342,10 +431,15 @@ public class CrossServerManager implements AutoCloseable {
             try {
                 CrossServerTradeSession session = new CrossServerTradeSession(
                         tradeId, localPlayer, remoteUuid, remoteName, remoteServer, this);
-                activeSessions.put(tradeId, session);
-                Trades.addCrossServerTrade(session);
-                MESSAGEUTILS.sendLang(localPlayer, "trade.started", Map.of("%player%", remoteName));
-                SoundUtils.playSound(localPlayer, "started");
+                if (activeSessions.putIfAbsent(tradeId, session) != null) {
+                    session.abort(true);
+                    return;
+                }
+                if (!Trades.addCrossServerTrade(session)) {
+                    activeSessions.remove(tradeId, session);
+                    session.abort(true);
+                    return;
+                }
             } catch (Exception ex) {
                 plugin.getLogger().warning("Could not start cross-server trade session: " + ex.getMessage());
             }
@@ -355,18 +449,28 @@ public class CrossServerManager implements AutoCloseable {
     private void subscribeLoop() {
         while (!closed) {
             try (Jedis jedis = pool.getResource()) {
+                if (closed) return;
                 subscriberJedis = jedis;
-                jedis.subscribe(new JedisPubSub() {
+                JedisPubSub listener = new JedisPubSub() {
                     @Override
                     public void onMessage(String channelName, String message) {
                         try {
                             CrossServerPacket packet = CrossServerPacket.fromJson(message);
-                            if (packet == null) return;
+                            if (packet == null || !packet.isWellFormed()) return;
+                            long age = System.currentTimeMillis() - packet.getTimestamp();
+                            if (age < -5_000L || age > PACKET_MAX_AGE_MILLIS) return;
                             handlePacket(packet);
                         } catch (Exception ignored) {
                         }
                     }
-                }, channel);
+                };
+                subscriber = listener;
+                try {
+                    jedis.subscribe(listener, channel);
+                } finally {
+                    if (subscriber == listener) subscriber = null;
+                    subscriberJedis = null;
+                }
             } catch (Exception ex) {
                 if (!closed) {
                     try {
@@ -381,113 +485,201 @@ public class CrossServerManager implements AutoCloseable {
     }
 
     private void handlePacket(CrossServerPacket packet) {
-        if (packet.getType() == null) return;
-        // Check if targeted to this server or relevant
-        if (packet.getTargetServer() != null && !packet.getTargetServer().equalsIgnoreCase(serverId)) {
+        if (closed || !packet.isWellFormed()
+                || !packet.getTargetServer().equalsIgnoreCase(serverId)
+                || packet.getSenderServer().equalsIgnoreCase(serverId)) {
             return;
         }
 
         switch (packet.getType()) {
             case REQUEST -> {
                 Player receiver = Bukkit.getPlayer(packet.getReceiverUuid());
-                if (receiver == null || !receiver.isOnline() || Trades.isTrading(receiver)
-                        || AxTrade.getPreferences().isDisabled(receiver.getUniqueId())) {
-                    CrossServerPacket deny = new CrossServerPacket(CrossServerPacket.Type.DENY);
-                    deny.setSenderUuid(packet.getSenderUuid());
-                    deny.setTargetServer(packet.getSenderServer());
-                    deny.setReceiverUuid(packet.getReceiverUuid());
-                    deny.setReceiverName(packet.getReceiverName());
-                    publish(deny);
-                    return;
-                }
-
-                incomingRequests.put(packet.getSenderUuid(), packet);
-
-                // Send request message to receiver
-                Map<String, String> replacements = Map.of("%player%", packet.getSenderName());
-                String commandRoot = "trade";
-                if (LANG.getSection("request.sent-receiver") == null) {
-                    MESSAGEUTILS.sendLang(receiver, "request.sent-receiver", replacements);
+                if (receiver == null || !receiver.isOnline()) {
+                    publishRequestDeny(packet);
                 } else {
-                    ServerPlayerWrapper wrap = ServerPlayerWrapper.wrap(receiver);
-                    wrap.message(StringUtils.format(CONFIG.getString("prefix") + LANG.getString("request.sent-receiver.info"), replacements));
-                    wrap.message(StringUtils.format(LANG.getString("request.sent-receiver.accept.message"), replacements)
-                            .hoverEvent(HoverEvent.showText(StringUtils.format(LANG.getString("request.sent-receiver.accept.hover"), replacements)))
-                            .clickEvent(ClickEvent.runCommand("/" + commandRoot + " accept " + packet.getSenderName())));
-                    wrap.message(StringUtils.format(LANG.getString("request.sent-receiver.deny.message"), replacements)
-                            .hoverEvent(HoverEvent.showText(StringUtils.format(LANG.getString("request.sent-receiver.deny.hover"), replacements)))
-                            .clickEvent(ClickEvent.runCommand("/" + commandRoot + " deny " + packet.getSenderName())));
+                    dispatch(receiver, () -> handleRequest(packet, receiver));
                 }
-                SoundUtils.playSound(receiver, "requested");
             }
             case ACCEPT -> {
                 Player sender = Bukkit.getPlayer(packet.getSenderUuid());
-                if (sender == null || !sender.isOnline()) return;
-                outgoingRequests.remove(packet.getReceiverUuid());
-                startSession(packet.getTradeId(), sender, packet.getReceiverUuid(), packet.getReceiverName(), packet.getReceiverServer());
+                dispatch(sender, () -> handleAccept(packet, sender));
             }
             case DENY -> {
                 Player sender = Bukkit.getPlayer(packet.getSenderUuid());
-                if (sender == null || !sender.isOnline()) return;
-                outgoingRequests.remove(packet.getReceiverUuid());
-                MESSAGEUTILS.sendLang(sender, "request.deny-sender", Map.of("%player%", packet.getReceiverName()));
-                SoundUtils.playSound(sender, "deny");
+                dispatch(sender, () -> handleDeny(packet, sender));
             }
             case TRADE_ITEMS -> {
-                CrossServerTradeSession session = activeSessions.get(packet.getTradeId());
+                CrossServerTradeSession session = findSession(packet);
                 if (session != null) {
-                    List<ItemStack> items = ItemSerialization.deserializeList(packet.getItems());
-                    session.onRemoteItemsReceived(items);
+                    dispatch(session.getLocalPlayer(), () -> {
+                        List<ItemStack> items = ItemSerialization.deserializeListStrict(packet.getItems());
+                        if (items != null) session.onRemoteItemsReceived(items);
+                    });
+                }
+            }
+            case TRADE_CURRENCY -> {
+                CrossServerTradeSession session = findSession(packet);
+                if (session != null) {
+                    dispatch(session.getLocalPlayer(), () ->
+                            session.onRemoteCurrency(packet.getCurrencyName(), packet.getCurrencyAmount()));
                 }
             }
             case TRADE_CONFIRM -> {
-                CrossServerTradeSession session = activeSessions.get(packet.getTradeId());
+                CrossServerTradeSession session = findSession(packet);
                 if (session != null) {
-                    session.onRemoteConfirm(packet.getConfirmSeconds());
+                    dispatch(session.getLocalPlayer(), () -> session.onRemoteConfirm(packet.getConfirmSeconds()));
                 }
             }
             case TRADE_UNCONFIRM -> {
-                CrossServerTradeSession session = activeSessions.get(packet.getTradeId());
-                if (session != null) {
-                    session.onRemoteUnconfirm();
-                }
+                CrossServerTradeSession session = findSession(packet);
+                if (session != null) dispatch(session.getLocalPlayer(), session::onRemoteUnconfirm);
             }
             case TRADE_ABORT -> {
-                CrossServerTradeSession session = activeSessions.get(packet.getTradeId());
-                if (session != null) {
-                    session.onRemoteAbortReceived();
-                }
+                CrossServerTradeSession session = findSession(packet);
+                if (session != null) dispatch(session.getLocalPlayer(), session::onRemoteAbortReceived);
             }
             case COMMIT_PREPARE -> {
-                CrossServerTradeSession session = activeSessions.get(packet.getTradeId());
+                CrossServerTradeSession session = findSession(packet);
                 if (session != null) {
-                    session.onRemoteCommitPrepare();
+                    dispatch(session.getLocalPlayer(),
+                            () -> session.onRemoteCommitPrepare(packet.getOfferDigest()));
+                }
+            }
+            case COMMIT_FINALIZE -> {
+                CrossServerTradeSession session = findSession(packet);
+                if (session != null) {
+                    dispatch(session.getLocalPlayer(),
+                            () -> session.onRemoteCommitFinalize(packet.getOfferDigest()));
                 }
             }
         }
+    }
+
+    private void handleRequest(CrossServerPacket packet, Player receiver) {
+        if (!receiver.isOnline() || Trades.isTrading(receiver)
+                || AxTrade.getPreferences().isDisabled(receiver.getUniqueId())) {
+            publishRequestDeny(packet);
+            return;
+        }
+
+        String key = requestKey(packet);
+        if (incomingRequests.putIfAbsent(key, packet) != null) return;
+        Scheduler.get().runLater(task -> incomingRequests.remove(key, packet), REQUEST_TIMEOUT_TICKS);
+
+        Map<String, String> replacements = Map.of("%player%", packet.getSenderName());
+        String commandRoot = "trade";
+        if (LANG.getSection("request.sent-receiver") == null) {
+            MESSAGEUTILS.sendLang(receiver, "request.sent-receiver", replacements);
+        } else {
+            ServerPlayerWrapper wrap = ServerPlayerWrapper.wrap(receiver);
+            wrap.message(StringUtils.format(CONFIG.getString("prefix") + LANG.getString("request.sent-receiver.info"), replacements));
+            wrap.message(StringUtils.format(LANG.getString("request.sent-receiver.accept.message"), replacements)
+                    .hoverEvent(HoverEvent.showText(StringUtils.format(LANG.getString("request.sent-receiver.accept.hover"), replacements)))
+                    .clickEvent(ClickEvent.runCommand("/" + commandRoot + " accept " + packet.getSenderName())));
+            wrap.message(StringUtils.format(LANG.getString("request.sent-receiver.deny.message"), replacements)
+                    .hoverEvent(HoverEvent.showText(StringUtils.format(LANG.getString("request.sent-receiver.deny.hover"), replacements)))
+                    .clickEvent(ClickEvent.runCommand("/" + commandRoot + " deny " + packet.getSenderName())));
+        }
+        SoundUtils.playSound(receiver, "requested");
+    }
+
+    private void publishRequestDeny(CrossServerPacket packet) {
+        CrossServerPacket deny = new CrossServerPacket(CrossServerPacket.Type.DENY);
+        deny.setSenderUuid(packet.getSenderUuid());
+        deny.setSenderServer(serverId);
+        deny.setTargetServer(packet.getSenderServer());
+        deny.setReceiverUuid(packet.getReceiverUuid());
+        deny.setReceiverName(packet.getReceiverName());
+        publish(deny);
+    }
+
+
+    private void handleAccept(CrossServerPacket packet, Player sender) {
+        if (sender == null || !sender.isOnline()) return;
+        String key = requestKey(packet);
+        CrossServerPacket request = outgoingRequests.get(key);
+        if (request == null || !Objects.equals(request.getSenderUuid(), packet.getSenderUuid())
+                || !Objects.equals(request.getReceiverUuid(), packet.getReceiverUuid())
+                || !Objects.equals(request.getTargetServer(), packet.getSenderServer())
+                || !Objects.equals(request.getReceiverName(), packet.getReceiverName())) {
+            return;
+        }
+        if (!outgoingRequests.remove(key, request)) return;
+        startSession(packet.getTradeId(), sender, packet.getReceiverUuid(), packet.getReceiverName(),
+                packet.getReceiverServer());
+    }
+
+    private void handleDeny(CrossServerPacket packet, Player sender) {
+        if (sender == null || !sender.isOnline()) return;
+        String key = requestKey(packet);
+        CrossServerPacket request = outgoingRequests.get(key);
+        if (request == null || !Objects.equals(request.getSenderUuid(), packet.getSenderUuid())
+                || !Objects.equals(request.getReceiverUuid(), packet.getReceiverUuid())
+                || !Objects.equals(request.getTargetServer(), packet.getSenderServer())
+                || !Objects.equals(request.getReceiverName(), packet.getReceiverName())) {
+            return;
+        }
+        if (!outgoingRequests.remove(key, request)) return;
+        MESSAGEUTILS.sendLang(sender, "request.deny-sender", Map.of("%player%", packet.getReceiverName()));
+        SoundUtils.playSound(sender, "deny");
+    }
+
+    private CrossServerTradeSession findSession(CrossServerPacket packet) {
+        CrossServerTradeSession session = activeSessions.get(packet.getTradeId());
+        return session != null && session.acceptsPeer(packet.getSenderUuid(), packet.getSenderServer())
+                ? session : null;
+    }
+
+    private void dispatch(Player player, Runnable action) {
+        if (player == null || closed) return;
+        Scheduler.get().run(player, task -> {
+            if (!closed && player.isOnline()) action.run();
+        }, () -> {});
+    }
+
+    private static String requestKey(CrossServerPacket packet) {
+        return packet.getSenderUuid() + ":" + packet.getReceiverUuid();
     }
 
     @Override
     public void close() {
-        closed = true;
+        if (closed) return;
         for (Player p : Bukkit.getOnlinePlayers()) {
-            unregisterPlayer(p);
+            String uuid = p.getUniqueId().toString();
+            String name = p.getName().toLowerCase(Locale.ROOT);
+            publishExecutor.execute(() -> unregisterPlayerNow(uuid, name));
         }
+        closed = true;
         for (CrossServerTradeSession session : activeSessions.values()) {
             session.abort(true);
         }
         activeSessions.clear();
-        publishExecutor.shutdownNow();
-        if (subscriberJedis != null) {
+        JedisPubSub currentSubscriber = subscriber;
+        if (currentSubscriber != null) {
             try {
-                subscriberJedis.close();
+                currentSubscriber.unsubscribe();
             } catch (Exception ignored) {
             }
         }
-        if (subscriberThread != null) {
-            subscriberThread.interrupt();
+        Jedis currentJedis = subscriberJedis;
+        if (currentJedis != null) {
+            try {
+                currentJedis.close();
+            } catch (Exception ignored) {
+            }
+        }
+        if (subscriberThread != null) subscriberThread.interrupt();
+        publishExecutor.shutdown();
+        try {
+            if (!publishExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                publishExecutor.shutdownNow();
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            publishExecutor.shutdownNow();
         }
         pool.close();
         instance = null;
     }
+
 }

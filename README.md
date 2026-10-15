@@ -1,3 +1,13 @@
+# AxTrade
+
+AxTrade fork with SQL storage, Redis preference synchronization and cross-server
+trade requests and offers.
+
+Cross-server settlement is not release-ready. Redis Pub/Sub and in-memory trade
+state cannot recover a prepared trade after a server crash or a lost commit
+message. Keep Redis disabled on production servers until these failure paths are
+resolved. No multiserver release has been published.
+
 **Bug Reports and Feature Requests:** https://github.com/Artillex-Studios/Issues
 
 **Support:** https://dc.artillex-studios.com/
@@ -82,9 +92,34 @@ prevents plugin startup rather than silently falling back to local storage.
 SQL history failures are logged; local text logs remain available. History is an
 audit log, not an item-delivery recovery system.
 
-Storage changes require a full server restart, not `/trade reload`. Redis does
-not enable cross-server trade requests or item transfers: both players must be
-on the same server.
+Storage changes require a full server restart, not `/trade reload`.
+
+## Redis multiserver trading
+
+Enabling `storage.redis.enabled` also starts the cross-server trade manager.
+Use `storage.backend: sql`, the same SQL database and Redis namespace on every
+participating server, and a unique `storage.redis.server-id` for each server.
+All participating servers must run the same plugin and Minecraft versions and
+have matching currency hooks and trade rules.
+
+The network player registry adds remote players to `/trade <player>` completion.
+Requests can be accepted or denied by name across servers. A bare `accept` or
+`deny` requires a single incoming request across both local and remote players.
+Remote item and currency offers update the local GUI; changing an offer clears
+confirmation. Session messages are checked against the expected player and
+server, and settlement is bound to the prepared offer.
+
+### Release blockers
+
+- Trade state and escrow are not durable. A lost prepare/finalize message or a
+  server crash can leave a trade unresolved or settle only one participant.
+- Currency operations and inventory delivery do not share an atomic transaction.
+  A partial economy failure cannot be recovered automatically.
+- Cross-server crash, disconnect and reconnect scenarios still need end-to-end
+  verification on two servers with the real economy integrations.
+
+SQL history is an audit trail, not a delivery queue or recovery journal. Do not
+treat it as protection against lost or duplicated items.
 
 ## Building
 

@@ -27,4 +27,5 @@ class StorageConfigTest {
         StorageConfig storageConfig = StorageConfig.read(config);
         org.junit.jupiter.api.Assertions.assertEquals(5432, storageConfig.port());
     }
+
 }

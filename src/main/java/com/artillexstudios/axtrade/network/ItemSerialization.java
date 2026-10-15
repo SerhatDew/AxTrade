@@ -26,7 +26,7 @@ public final class ItemSerialization {
             }
             return Base64.getEncoder().encodeToString(outputStream.toByteArray());
         } catch (Exception ex) {
-            return null;
+            throw new IllegalStateException("Could not serialize a non-air trade item", ex);
         }
     }
 
@@ -53,11 +53,13 @@ public final class ItemSerialization {
         return result;
     }
 
-    public static List<ItemStack> deserializeList(List<String> encoded) {
-        if (encoded == null) return List.of();
+    public static List<ItemStack> deserializeListStrict(List<String> encoded) {
+        if (encoded == null) return null;
         List<ItemStack> result = new ArrayList<>(encoded.size());
-        for (String s : encoded) {
-            result.add(deserialize(s));
+        for (String value : encoded) {
+            ItemStack item = deserialize(value);
+            if (value != null && (value.isBlank() || item == null)) return null;
+            result.add(item);
         }
         return result;
     }

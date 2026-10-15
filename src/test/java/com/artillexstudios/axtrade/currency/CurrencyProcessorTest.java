@@ -11,6 +11,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 class CurrencyProcessorTest {
@@ -47,5 +48,57 @@ class CurrencyProcessorTest {
         assertFalse(result, "Processor should report failure when any currency deduction fails exceptionally");
         verify(hook1, times(1)).giveBalance(uuid, 100.0);
         verify(hook2, never()).giveBalance(eq(uuid), anyDouble());
+    }
+
+    @Test
+    void failedDeductionWaitsForRefundBeforeCompleting() {
+        Player player = mock(Player.class);
+        UUID uuid = UUID.randomUUID();
+        when(player.getUniqueId()).thenReturn(uuid);
+        CurrencyHook paid = mock(CurrencyHook.class);
+        CurrencyHook rejected = mock(CurrencyHook.class);
+        CompletableFuture<Boolean> refund = new CompletableFuture<>();
+        when(paid.takeBalance(uuid, 100.0)).thenReturn(CompletableFuture.completedFuture(true));
+        when(paid.giveBalance(uuid, 100.0)).thenReturn(refund);
+        when(rejected.takeBalance(uuid, 50.0)).thenReturn(CompletableFuture.completedFuture(false));
+
+        CurrencyProcessor processor = new CurrencyProcessor(player, Set.of(
+                Map.entry(paid, 100.0), Map.entry(rejected, 50.0)));
+        CompletableFuture<Boolean> result = processor.run();
+
+        assertFalse(result.isDone());
+        refund.complete(true);
+        assertFalse(result.join());
+    }
+
+    @Test
+    void repeatedRollbackDoesNotRefundTwice() {
+        Player player = mock(Player.class);
+        UUID uuid = UUID.randomUUID();
+        when(player.getUniqueId()).thenReturn(uuid);
+        CurrencyHook currency = mock(CurrencyHook.class);
+        when(currency.takeBalance(uuid, 100.0)).thenReturn(CompletableFuture.completedFuture(true));
+        when(currency.giveBalance(uuid, 100.0)).thenReturn(CompletableFuture.completedFuture(true));
+        CurrencyProcessor processor = new CurrencyProcessor(player, Set.of(Map.entry(currency, 100.0)));
+
+        assertTrue(processor.run().join());
+        assertTrue(processor.reverse().join());
+        assertTrue(processor.reverse().join());
+
+        verify(currency, times(1)).giveBalance(uuid, 100.0);
+    }
+
+    @Test
+    void rejectedRefundIsReportedAsFailure() {
+        Player player = mock(Player.class);
+        UUID uuid = UUID.randomUUID();
+        when(player.getUniqueId()).thenReturn(uuid);
+        CurrencyHook currency = mock(CurrencyHook.class);
+        when(currency.takeBalance(uuid, 100.0)).thenReturn(CompletableFuture.completedFuture(true));
+        when(currency.giveBalance(uuid, 100.0)).thenReturn(CompletableFuture.completedFuture(false));
+        CurrencyProcessor processor = new CurrencyProcessor(player, Set.of(Map.entry(currency, 100.0)));
+
+        assertTrue(processor.run().join());
+        assertFalse(processor.reverse().join());
     }
 }

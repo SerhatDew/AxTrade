@@ -15,6 +15,7 @@ public class CurrencyProcessor {
     private final Player player;
     private final Set<Map.Entry<CurrencyHook, Double>> currencies;
     private final Map<Map.Entry<CurrencyHook, Double>, Boolean> states = new ConcurrentHashMap<>();
+    private CompletableFuture<Boolean> reversal;
 
     public CurrencyProcessor(Player player, Set<Map.Entry<CurrencyHook, Double>> currencies) {
         this.player = player;
@@ -51,30 +52,33 @@ public class CurrencyProcessor {
             steps.add(step);
         }
 
-        return CompletableFuture.allOf(steps.toArray(CompletableFuture[]::new)).thenApply(unused -> {
+        return CompletableFuture.allOf(steps.toArray(CompletableFuture[]::new)).thenCompose(unused -> {
             if (anyErrors.get()) {
-                reverse();
-                return false;
+                return reverse().thenApply(refunded -> false);
             }
-            return true;
+            return CompletableFuture.completedFuture(true);
         });
     }
 
-    public CompletableFuture<Boolean> reverse() {
+    public synchronized CompletableFuture<Boolean> reverse() {
+        if (reversal != null) return reversal;
         List<CompletableFuture<Boolean>> refunds = new ArrayList<>();
         for (Map.Entry<Map.Entry<CurrencyHook, Double>, Boolean> entry : states.entrySet()) {
             if (!Boolean.TRUE.equals(entry.getValue())) continue;
             try {
                 CompletableFuture<Boolean> give = entry.getKey().getKey().giveBalance(player.getUniqueId(), entry.getKey().getValue());
-                if (give != null) {
-                    refunds.add(give);
-                }
-            } catch (Throwable ignored) {
+                refunds.add(give == null ? CompletableFuture.completedFuture(false) : give);
+            } catch (RuntimeException ex) {
+                refunds.add(CompletableFuture.completedFuture(false));
             }
         }
-        if (refunds.isEmpty()) {
-            return CompletableFuture.completedFuture(true);
-        }
-        return CompletableFuture.allOf(refunds.toArray(CompletableFuture[]::new)).handle((v, t) -> t == null);
+        reversal = CompletableFuture.allOf(refunds.toArray(CompletableFuture[]::new)).handle((v, error) -> {
+            if (error != null) return false;
+            for (CompletableFuture<Boolean> refund : refunds) {
+                if (!Boolean.TRUE.equals(refund.join())) return false;
+            }
+            return true;
+        });
+        return reversal;
     }
 }

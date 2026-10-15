@@ -23,6 +23,31 @@ class StorageManagerTest {
     Path directory;
 
     @Test
+    void uppercaseLegacyPreferenceKeyIsUpdatedInPlace() throws Exception {
+        UUID player = UUID.fromString("abcdefab-cdef-abcd-efab-cdefabcdefab");
+        Path toggled = directory.resolve("toggled.yml");
+        String legacyKey = player.toString().toUpperCase(java.util.Locale.ROOT);
+        Files.writeString(toggled, "toggled:\n  " + legacyKey + ": true\n");
+
+        StorageManager manager = open(toggled);
+        try {
+            manager.load(player).get(5, TimeUnit.SECONDS);
+            assertTrue(manager.isDisabled(player));
+            assertFalse(manager.toggle(player).get(5, TimeUnit.SECONDS));
+        } finally {
+            manager.close();
+        }
+
+        StorageManager restarted = open(toggled);
+        try {
+            restarted.load(player).get(5, TimeUnit.SECONDS);
+            assertFalse(restarted.isDisabled(player));
+        } finally {
+            restarted.close();
+        }
+    }
+
+    @Test
     void legacyDisabledPreferenceSurvivesToggleAndRestart() throws Exception {
         UUID player = UUID.randomUUID();
         Path toggled = directory.resolve("toggled.yml");
@@ -80,6 +105,69 @@ class StorageManagerTest {
             assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> manager.toggle(player).get(5, TimeUnit.SECONDS));
             assertFalse(manager.isDisabled(player));
+        } finally {
+            manager.close();
+        }
+    }
+
+    @Test
+    void staleLoadCannotRestoreReadinessAfterUnloadAndRejoin() throws Exception {
+        SqlStore sql = mock(SqlStore.class);
+        StorageManager manager = openSqlManager(sql);
+        UUID player = UUID.randomUUID();
+        java.util.concurrent.CountDownLatch staleQueryStarted = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch releaseStaleQuery = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch rejoinQueryStarted = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+        when(sql.readPreference(player)).thenAnswer(inv -> {
+            if (reads.incrementAndGet() == 1) {
+                staleQueryStarted.countDown();
+                if (!releaseStaleQuery.await(5, TimeUnit.SECONDS)) throw new AssertionError("Latch timeout");
+                return true;
+            }
+            rejoinQueryStarted.countDown();
+            return false;
+        });
+
+        try {
+            CompletableFuture<Boolean> staleLoad = manager.load(player);
+            if (!staleQueryStarted.await(5, TimeUnit.SECONDS)) throw new AssertionError("Query not started");
+
+            manager.unload(player);
+            CompletableFuture<Boolean> rejoinLoad = manager.load(player);
+            if (!rejoinQueryStarted.await(5, TimeUnit.SECONDS)) throw new AssertionError("Rejoin query not started");
+            rejoinLoad.get(5, TimeUnit.SECONDS);
+            assertFalse(manager.isDisabled(player));
+
+            releaseStaleQuery.countDown();
+            staleLoad.get(5, TimeUnit.SECONDS);
+
+            assertTrue(manager.isReady(player));
+            assertFalse(manager.isDisabled(player), "A load from the previous session must not overwrite rejoin state");
+        } finally {
+            releaseStaleQuery.countDown();
+            manager.close();
+        }
+    }
+
+    @Test
+    void refreshTreatsMissingSqlRowsAsEnabled() throws Exception {
+        SqlStore sql = mock(SqlStore.class);
+        StorageManager manager = openSqlManager(sql);
+        UUID player = UUID.randomUUID();
+        when(sql.readPreference(player)).thenReturn(true);
+        when(sql.readPreferences(org.mockito.ArgumentMatchers.anySet())).thenReturn(java.util.Map.of());
+
+        try {
+            manager.load(player).get(5, TimeUnit.SECONDS);
+            assertTrue(manager.isDisabled(player));
+
+            var refreshMethod = StorageManager.class.getDeclaredMethod("refresh", UUID.class);
+            refreshMethod.setAccessible(true);
+            ((CompletableFuture<?>) refreshMethod.invoke(manager, (UUID) null)).get(5, TimeUnit.SECONDS);
+
+            assertFalse(manager.isDisabled(player),
+                    "A missing SQL preference row has the same enabled default as a direct read");
         } finally {
             manager.close();
         }

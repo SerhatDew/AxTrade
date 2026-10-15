@@ -2,6 +2,7 @@ package com.artillexstudios.axtrade.storage;
 
 import com.artillexstudios.axapi.config.Config;
 
+import java.util.Locale;
 record StorageConfig(
         Backend backend,
         String dialect,
@@ -34,7 +35,7 @@ record StorageConfig(
         if ("sql".equalsIgnoreCase(configuredBackend)) backend = Backend.SQL;
         else if ("yaml".equalsIgnoreCase(configuredBackend)) backend = Backend.YAML;
         else throw new IllegalArgumentException("storage.backend must be yaml or sql");
-        String dialect = config.getString("storage.sql.dialect", "mysql").toLowerCase();
+        String dialect = config.getString("storage.sql.dialect", "mysql").toLowerCase(Locale.ROOT);
         return new StorageConfig(
                 backend,
                 dialect,

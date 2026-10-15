@@ -44,28 +44,12 @@ import static com.artillexstudios.axtrade.AxTrade.LANG;
 import static com.artillexstudios.axtrade.AxTrade.MESSAGEUTILS;
 
 public class TradeGui extends GuiFrame {
-    private static final Cooldown<Player> confirmCooldown = isFoliaSafe() ? Cooldown.createSynchronized() : Cooldown.create();
-
-    private static boolean isFoliaSafe() {
-        try {
-            return PaperUtils.isFolia();
-        } catch (Throwable t) {
-            return false;
-        }
-    }
+    private static final Cooldown<Player> confirmCooldown = PaperUtils.isFolia() ? Cooldown.createSynchronized() : Cooldown.create();
     protected final Trade trade;
     private final TradePlayer player;
     protected final StorageGui gui;
-    protected final List<Integer> slots = getSlotsSafe("own-slots");
-    protected final List<Integer> otherSlots = getSlotsSafe("partner-slots");
-
-    private List<Integer> getSlotsSafe(String route) {
-        try {
-            return getSlots(route);
-        } catch (Throwable t) {
-            return List.of();
-        }
-    }
+    protected final List<Integer> slots = getSlots("own-slots");
+    protected final List<Integer> otherSlots = getSlots("partner-slots");
     private String currentTitle = "";
     private boolean inSign = false;
 
