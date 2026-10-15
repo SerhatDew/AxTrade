@@ -78,12 +78,38 @@ blacklist-items:
     material: BARRIER
     name: "*Another custom item*"
 
-# should doing any of these actions abort if done while trading?
-# we recommend leaving these enabled to prevent potential bugs
 abort:
   move: true
   interact: true
   command: true
+
+storage:
+  # yaml keeps the historical toggled.yml file. sql requires a reachable database.
+  backend: yaml
+  sql:
+    dialect: mysql
+    host: localhost
+    port: 3306
+    database: axtrade
+    username: axtrade
+    password: ""
+    pool-size: 4
+    connection-timeout-ms: 3000
+    validation-timeout-ms: 1000
+    url: ""
+  redis:
+    enabled: false
+    host: localhost
+    port: 6379
+    username: ""
+    password: ""
+    database: 0
+    tls: false
+    namespace: axtrade
+    server-id: server
+    connect-timeout-ms: 3000
+    socket-timeout-ms: 3000
+
 
 # should be plugin notify you if there is a new update?
 update-notifier:
@@ -97,4 +123,4 @@ update-notifier:
 enable-safety: true
 
 # do not change this
-version: 9
+version: 10
