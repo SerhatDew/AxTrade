@@ -28,10 +28,13 @@ import static com.artillexstudios.axtrade.AxTrade.LANG;
 import static com.artillexstudios.axtrade.AxTrade.MESSAGEUTILS;
 
 public class Trade {
-    protected final TradePlayer player1;
-    protected final TradePlayer player2;
+    protected TradePlayer player1;
+    protected TradePlayer player2;
     private volatile boolean ended = false;
     protected long prepTime = System.currentTimeMillis();
+
+    protected Trade() {
+    }
 
     public Trade(Player p1, Player p2) {
         this.player1 = new TradePlayer(this, p1);
@@ -276,7 +279,7 @@ public class Trade {
         return ended;
     }
 
-    private void addOrDrop(Inventory inventory, List<ItemStack> items, Location location) {
+    protected void addOrDrop(Inventory inventory, List<ItemStack> items, Location location) {
         boolean folia = PaperUtils.isFolia();
         boolean sync = folia ? Scheduler.get().isOwnedByCurrentRegion(location) : Bukkit.isPrimaryThread();
 
@@ -295,7 +298,7 @@ public class Trade {
         }
     }
 
-    private void execute(Player player, Runnable runnable) {
+    protected void execute(Player player, Runnable runnable) {
         boolean folia = PaperUtils.isFolia();
         boolean sync = folia ? Scheduler.get().isOwnedByCurrentRegion(player.getLocation()) : Bukkit.isPrimaryThread();
         if (sync) {

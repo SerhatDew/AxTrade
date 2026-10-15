@@ -20,7 +20,7 @@ trade-request-expire-seconds: 60
 
 # how far apart the 2 players can be from each other?
 # set to -1 to disable
-trade-max-distance: 10
+trade-max-distance: -1
 
 # should shift + right clicking on another player send them a trade request?
 shift-click-send-request: true

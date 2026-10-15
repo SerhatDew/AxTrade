@@ -52,8 +52,8 @@ public class GuiFrame {
     protected ItemStack buildItem(@NotNull String key, Map<String, String> replacements) {
         if (file.getSection(key) == null) return air;
 
-        final PlayerTextures selfTextures = ServerPlayerWrapper.wrap(player.getPlayer()).textures();
-        final PlayerTextures otherTextures = ServerPlayerWrapper.wrap(trade.getOtherPlayer(player.getPlayer())).textures();
+        final PlayerTextures selfTextures = getTextures(player.getPlayer());
+        final PlayerTextures otherTextures = getTextures(trade.getOtherPlayer(player.getPlayer()));
 
         final HashMap<String, String> map = new HashMap<>(replacements);
         map.put("%own-head%", selfTextures.texture() == null ? "" : selfTextures.texture());
@@ -115,5 +115,13 @@ public class GuiFrame {
         }
 
         return slots;
+    }
+
+    private PlayerTextures getTextures(Player target) {
+        try {
+            return ServerPlayerWrapper.wrap(target).textures();
+        } catch (Throwable t) {
+            return new PlayerTextures(null, null);
+        }
     }
 }

@@ -126,6 +126,7 @@ public final class AxTrade extends AxPlugin {
         TradeTicker.start();
         SafetyManager.start();
 
+        com.artillexstudios.axtrade.network.CrossServerManager.init(this);
         Bukkit.getConsoleSender().sendMessage(StringUtils.formatToString("&#00FFDD[AxTrade] Loaded plugin!"));
 
         metrics = new AxMetrics(this, 8);
@@ -142,6 +143,9 @@ public final class AxTrade extends AxPlugin {
         SafetyManager.stop();
         com.artillexstudios.axtrade.trade.Trades.abortAll();
         com.artillexstudios.axtrade.request.Requests.clear();
+        if (com.artillexstudios.axtrade.network.CrossServerManager.getInstance() != null) {
+            com.artillexstudios.axtrade.network.CrossServerManager.getInstance().close();
+        }
         com.artillexstudios.axtrade.utils.HistoryUtils.close();
         PreferencesService current = preferences;
         preferences = UnavailablePreferences.INSTANCE;

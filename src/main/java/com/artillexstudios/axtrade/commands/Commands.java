@@ -21,20 +21,20 @@ public class Commands implements OrphanCommand {
 
     @AutoComplete("@trade-players")
     @DefaultFor("~")
-    public void trade(Player sender, @Optional Player other) {
-        Request.INSTANCE.execute(sender, other);
+    public void trade(Player sender, @Optional String target) {
+        Request.INSTANCE.execute(sender, target);
     }
 
     @AutoComplete("@incoming-trade-players")
     @Subcommand("accept")
-    public void accept(Player sender, @Optional Player other) {
-        Accept.INSTANCE.execute(sender, other);
+    public void accept(Player sender, @Optional String target) {
+        Accept.INSTANCE.execute(sender, target);
     }
 
     @AutoComplete("@incoming-trade-players")
     @Subcommand("deny")
-    public void deny(Player sender, @Optional Player other) {
-        Deny.INSTANCE.execute(sender, other);
+    public void deny(Player sender, @Optional String target) {
+        Deny.INSTANCE.execute(sender, target);
     }
 
     @CommandPermission("axtrade.toggle")

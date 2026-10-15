@@ -17,8 +17,8 @@ import static com.artillexstudios.axtrade.AxTrade.MESSAGEUTILS;
 
 public class TradePlayer {
     private final Player player;
-    private TradePlayer otherPlayer;
-    private TradeGui tradeGui;
+    protected TradePlayer otherPlayer;
+    protected TradeGui tradeGui;
     private final Trade trade;
     private final ConcurrentHashMap<CurrencyHook, Double> currencies = new ConcurrentHashMap<>();
 
@@ -77,6 +77,9 @@ public class TradePlayer {
 
         getTradeGui().updateTitle();
         otherPlayer.getTradeGui().updateTitle();
+        if (trade instanceof com.artillexstudios.axtrade.network.CrossServerTradeSession css) {
+            css.broadcastConfirm(this.confirmed);
+        }
     }
 
     public void cancel() {
@@ -88,11 +91,18 @@ public class TradePlayer {
 
             getTradeGui().updateTitle();
             otherPlayer.getTradeGui().updateTitle();
+            if (trade instanceof com.artillexstudios.axtrade.network.CrossServerTradeSession css) {
+                css.broadcastUnconfirm();
+            }
             return;
         }
-        if (otherPlayer.setConfirmed(null)) getTradeGui().updateTitle();
+        if (otherPlayer.setConfirmed(null)) {
+            getTradeGui().updateTitle();
+            if (trade instanceof com.artillexstudios.axtrade.network.CrossServerTradeSession css) {
+                css.broadcastUnconfirm();
+            }
+        }
     }
-
     public boolean setConfirmed(Integer confirmed) {
         if (Objects.equals(this.confirmed, confirmed)) return false;
         this.confirmed = confirmed;
@@ -137,8 +147,15 @@ public class TradePlayer {
     }
 
     public int getEmptySlots() {
+        if (player == null || player.getInventory() == null) {
+            return 36;
+        }
+        ItemStack[] contents = player.getInventory().getStorageContents();
+        if (contents == null) {
+            return 36;
+        }
         int am = 0;
-        for (ItemStack item : player.getInventory().getStorageContents()) {
+        for (ItemStack item : contents) {
             if (item != null) continue;
             am++;
         }

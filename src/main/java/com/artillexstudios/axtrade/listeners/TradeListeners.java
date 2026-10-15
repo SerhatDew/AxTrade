@@ -16,6 +16,7 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerPickupArrowEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.jetbrains.annotations.NotNull;
+import org.bukkit.event.player.PlayerJoinEvent;
 
 import static com.artillexstudios.axtrade.AxTrade.CONFIG;
 
@@ -27,6 +28,13 @@ public class TradeListeners implements Listener {
         handleQuitRequest(event);
     }
 
+    @EventHandler
+    public void onJoin(@NotNull PlayerJoinEvent event) {
+        if (com.artillexstudios.axtrade.network.CrossServerManager.isEnabled()) {
+            com.artillexstudios.axtrade.network.CrossServerManager.getInstance().registerPlayer(event.getPlayer());
+        }
+    }
+
     public void handleQuitTrade(@NotNull PlayerQuitEvent event) {
         Player player = event.getPlayer();
         Trade trade = Trades.getTrade(player);
@@ -36,6 +44,9 @@ public class TradeListeners implements Listener {
 
     public void handleQuitRequest(@NotNull PlayerQuitEvent event) {
         Requests.removeFor(event.getPlayer());
+        if (com.artillexstudios.axtrade.network.CrossServerManager.isEnabled()) {
+            com.artillexstudios.axtrade.network.CrossServerManager.getInstance().unregisterPlayer(event.getPlayer());
+        }
     }
 
     @EventHandler

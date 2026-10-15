@@ -34,6 +34,14 @@ public final class Trades {
         }
     }
 
+    public static boolean addCrossServerTrade(Trade trade) {
+        if (trade == null) return false;
+        synchronized (trades) {
+            trades.add(trade);
+            return true;
+        }
+    }
+
     public static void removeTrade(Trade trade) {
         if (trade == null) {
             return;

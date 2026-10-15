@@ -56,6 +56,9 @@ public final class CommandManager {
             }
             names.add(player.getName());
         }
+        if (com.artillexstudios.axtrade.network.CrossServerManager.isEnabled()) {
+            names.addAll(com.artillexstudios.axtrade.network.CrossServerManager.getInstance().getNetworkPlayerNames(viewer));
+        }
         return names;
     }
 
@@ -71,6 +74,9 @@ public final class CommandManager {
             if (sender.isOnline() && receiver.canSee(sender)) {
                 names.add(sender.getName());
             }
+        }
+        if (com.artillexstudios.axtrade.network.CrossServerManager.isEnabled()) {
+            names.addAll(com.artillexstudios.axtrade.network.CrossServerManager.getInstance().getIncomingSenderNames(receiver));
         }
         return names;
 

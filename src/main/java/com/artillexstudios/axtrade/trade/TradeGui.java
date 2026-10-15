@@ -44,21 +44,45 @@ import static com.artillexstudios.axtrade.AxTrade.LANG;
 import static com.artillexstudios.axtrade.AxTrade.MESSAGEUTILS;
 
 public class TradeGui extends GuiFrame {
-    private static final Cooldown<Player> confirmCooldown = PaperUtils.isFolia() ? Cooldown.createSynchronized() : Cooldown.create();;
+    private static final Cooldown<Player> confirmCooldown = isFoliaSafe() ? Cooldown.createSynchronized() : Cooldown.create();
+
+    private static boolean isFoliaSafe() {
+        try {
+            return PaperUtils.isFolia();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
     protected final Trade trade;
     private final TradePlayer player;
     protected final StorageGui gui;
-    protected final List<Integer> slots = getSlots("own-slots");
-    protected final List<Integer> otherSlots = getSlots("partner-slots");
+    protected final List<Integer> slots = getSlotsSafe("own-slots");
+    protected final List<Integer> otherSlots = getSlotsSafe("partner-slots");
+
+    private List<Integer> getSlotsSafe(String route) {
+        try {
+            return getSlots(route);
+        } catch (Throwable t) {
+            return List.of();
+        }
+    }
     private String currentTitle = "";
     private boolean inSign = false;
 
     public TradeGui(@NotNull Trade trade, @NotNull TradePlayer player) {
+        this(trade, player, false);
+    }
+
+    protected TradeGui(@NotNull Trade trade, @NotNull TradePlayer player, boolean virtual) {
         super(GUIS, player.getPlayer(), trade);
         this.trade = trade;
         this.player = player;
+        if (virtual) {
+            this.gui = null;
+            return;
+        }
         this.gui = Gui.storage()
-                .rows(GUIS.getInt("rows",6))
+                .rows(GUIS.getInt("rows", 6))
                 .title(Component.empty())
                 .disableItemDrop()
                 .create();
@@ -81,6 +105,7 @@ public class TradeGui extends GuiFrame {
     }
 
     public void update() {
+        if (gui == null) return;
         if (player.hasConfirmed()) {
             super.createItem("own.confirm-item.slot", "own.confirm-item.cancel", event -> {
                 event.setCancelled(true);
@@ -155,7 +180,7 @@ public class TradeGui extends GuiFrame {
         List<ItemStack> otherItems = player.getOtherPlayer().getTradeGui().getItems(true);
         int n = 0;
         for (int slot : otherSlots) {
-            if (otherItems.get(n) != null)
+            if (n < otherItems.size() && otherItems.get(n) != null)
                 gui.updateItem(slot, new GuiItem(otherItems.get(n), event -> event.setCancelled(true)));
             n++;
         }
@@ -373,6 +398,7 @@ public class TradeGui extends GuiFrame {
 
     public List<ItemStack> getItems(boolean includeAir) {
         final List<ItemStack> items = new ArrayList<>();
+        if (gui == null) return items;
         for (int slot : slots) {
             ItemStack item = gui.getInventory().getItem(slot);
             if (!includeAir && (item == null || item.getType().isAir())) continue;
@@ -382,6 +408,7 @@ public class TradeGui extends GuiFrame {
     }
 
     public void updateTitle() {
+        if (gui == null) return;
         String newTitle = GUIS.getString("title")
                 .replace("%player%", player.getOtherPlayer().getPlayer().getName())
                 .replace("%own-status%", player.hasConfirmed() ? LANG.getString("placeholders.ready") : LANG.getString("placeholders.waiting"))
